@@ -1,0 +1,15 @@
+[project]
+name = "videoprinterturbo-lipsync"
+version = "0.1.0"
+description = "VideoPrinterTurbo 本地 LipSync 后端服务"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn==0.32.1",
+]
+
+[tool.uv]
+package = false
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
