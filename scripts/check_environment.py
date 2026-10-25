@@ -14,6 +14,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--load-model', action='store_true')
     args = parser.parse_args()
+    from lipsync_service.source_assets import verify_source
+    print(f'MuseTalk bundled source verified ({verify_source()} files).')
     if sys.version_info[:2] != (3, 10):
         raise RuntimeError('Deployment requires Python 3.10')
     for executable in ('ffmpeg', 'ffprobe', 'nvidia-smi'):

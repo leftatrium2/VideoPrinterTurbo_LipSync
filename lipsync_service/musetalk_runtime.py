@@ -101,6 +101,8 @@ def prepare_detector_cache(source, cache, *, use_symlink):
 class MuseTalkRuntime:
     def __init__(self, settings):
         source, models = Path(settings['source']), Path(settings['models'])
+        from .source_assets import verify_source
+        verify_source(source)
         from .model_assets import verify_models
         verify_models(models)
         detector_cache = Path(os.environ['TORCH_HOME']) / 'hub' / 'checkpoints' / 's3fd-619a316812.pth'

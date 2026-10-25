@@ -38,3 +38,30 @@ Win32 API 调用在 macOS 上使用模拟接口，不能据此声称已完成 Wi
 - [Windows Job Object 生命周期](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)。
 
 仍需在原生 Windows 10/11 x64 + NVIDIA 机器执行完整安装、DLL/CUDA/MMCV 算子检查、目录联接、进程树回收及真实口型效果验收。
+
+## 服务器源码漏打包修复
+
+服务器已通过 RTX 3080 的 CUDA/MMCV 算子检查及所有推理权重校验，但初始化报告 `ModuleNotFoundError: No module named 'musetalk.models'`。
+根因是项目 `.gitignore` 中未锚定的 `models/` 同时忽略了 `third_party/MuseTalk/musetalk/models/` 下的 Python 源码。
+本地源码存在，因此此前只检查文件哈希的测试未发现 Git 同步漏文件。
+
+回归测试先复现失败：Git 明确忽略了 `syncnet.py`、`unet.py` 和 `vae.py`。将规则修正为 `/models/` 后，三个源码文件可以纳入版本控制，完整上游清单不再有被忽略的文件，根目录下载权重仍被忽略。
+新增源码预检会在环境检查及模型加载时验证 75 个源码文件，缺失或改变时报告具体名称，无需先加载 CUDA。
+
+部署本次修复时必须一并同步以下三个源码文件，仅更新 `.gitignore` 无法补回已遗漏的文件：
+
+```text
+third_party/MuseTalk/musetalk/models/syncnet.py
+third_party/MuseTalk/musetalk/models/unet.py
+third_party/MuseTalk/musetalk/models/vae.py
+```
+
+同步后在服务器项目根目录执行：
+
+```bash
+.conda/musetalk/bin/python -m lipsync_service.source_assets
+.conda/musetalk/bin/python scripts/check_environment.py --load-model
+```
+
+本次全量回归：**45 passed，0 skipped，退出码 0**，耗时 33.93 秒，包含真实 TCP 和新增源码打包检查。
+无需重新安装现有依赖或下载已通过校验的权重。此修复的本地回归验证不能代替服务器实际模型初始化复验。
