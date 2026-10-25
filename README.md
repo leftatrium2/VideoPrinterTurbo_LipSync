@@ -80,6 +80,8 @@ A persistent spawned Python process loads MuseTalk modules directly and reuses w
 
 Timeouts and inference failures recycle the model process and its FFmpeg descendants. Failed jobs stay failed and are never silently retried. A supervisor also recovers idle worker crashes; failed recovery retries every 30 seconds. Health and new submissions may return 503 during recovery. Queued jobs retain ordering and may fail if their initialization attempt fails.
 
+Normal shutdown asks the idle model worker to exit and waits up to 10 seconds for Python resource cleanup before terminating its process tree. Failure and inference-timeout recovery still use forced termination.
+
 Inputs must share a start time and differ in duration by no more than 150 ms. Videos must have a constant frame rate and detectable faces. Output preserves frame count, order and fractional frame rate; no video looping, speed changes or truncation are used. Missing faces or variable frame rate cause failure. Output is fully decoded, duration-checked and muxed with the uploaded audio. Visual lip-sync quality requires manual review.
 
 Preprocessing still stores decoded images and reads the complete clip into memory; long videos require sufficient RAM and disk. Jobs have isolated temporary directories and TTL cleanup. Metadata/queue are in memory; restart invalidates old IDs and clears abandoned run files.

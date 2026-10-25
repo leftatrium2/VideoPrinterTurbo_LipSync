@@ -23,7 +23,11 @@ def copying_worker(connection, settings):
         os.setsid()
     connection.send(('ready', None))
     while True:
-        video, audio, output = connection.recv()
+        request = connection.recv()
+        if request is None:
+            connection.close()
+            return
+        video, audio, output = request
         marker = Path(settings['runtime']) / 'failed-once'
         if settings['gpu'] in ('timeout', 'crash', 'error') and not marker.exists():
             marker.touch()

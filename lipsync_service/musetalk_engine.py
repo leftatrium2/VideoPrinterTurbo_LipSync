@@ -12,6 +12,7 @@ from .engine import finalize_output, validate_inputs
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
+SHUTDOWN_GRACE_SECONDS = 10
 
 
 def _worker(connection, settings):
@@ -164,10 +165,23 @@ class MuseTalkEngine:
             finally:
                 self._lock.release()
 
-    def _stop(self):
+    def _stop(self, *, graceful=False):
+        was_loaded = self._loaded
         self._loaded = False
         process, self._process = self._process, None
         group_id, self._group_id = self._group_id, None
+        if (graceful and was_loaded and process is not None and process.is_alive()
+                and self._connection is not None):
+            try:
+                # Returning normally lets multiprocessing run semaphore
+                # finalizers. SIGKILL/TerminateProcess skips those finalizers.
+                self._connection.send(None)
+                process.join(timeout=SHUTDOWN_GRACE_SECONDS)
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            if process.is_alive():
+                logger.warning('MuseTalk worker did not exit within %ss; terminating its process tree',
+                               SHUTDOWN_GRACE_SECONDS)
         if self._windows_job is not None:
             try:
                 self._windows_job.close()
@@ -204,7 +218,7 @@ class MuseTalkEngine:
     def close(self):
         self._closing.set()
         with self._lock:
-            self._stop()
+            self._stop(graceful=True)
         if self._watcher is not None:
             self._watcher.join(timeout=10)
 
