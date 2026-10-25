@@ -13,6 +13,9 @@ try {
         if ($Root -match '[^\x00-\x7F]') {
             throw 'Move this project to an ASCII path such as D:\VideoPrinterTurbo_LipSync (OpenCV/Conda path compatibility).'
         }
+        # Catch incomplete Git/ZIP exports before downloading Conda or packages.
+        # This PowerShell-only check also works before Python is installed.
+        Assert-BundledSource -Root $Root
         $Prefix = Join-Path $Root '.conda\musetalk'
         Set-ProjectEnvironment -Root $Root -Prefix $Prefix
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

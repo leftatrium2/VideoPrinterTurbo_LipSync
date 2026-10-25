@@ -3,8 +3,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Assert-WindowsX64 {
+    $Architecture = $env:PROCESSOR_ARCHITECTURE
+    if ($env:PROCESSOR_ARCHITEW6432) { $Architecture = $env:PROCESSOR_ARCHITEW6432 }
     if ($env:OS -ne 'Windows_NT' -or -not [Environment]::Is64BitProcess -or
-        $env:PROCESSOR_ARCHITECTURE -ne 'AMD64') {
+        $Architecture -ne 'AMD64') {
         throw 'Use 64-bit PowerShell on Windows x64 with an NVIDIA GPU.'
     }
 }
@@ -15,6 +17,33 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) {
         throw "Command failed (exit $LASTEXITCODE): $Executable $($Arguments -join ' ')"
     }
+}
+
+function Assert-BundledSource {
+    param([Parameter(Mandatory = $true)][string] $Root)
+    $ManifestPath = Join-Path $Root 'third_party/MuseTalk.source.json'
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        throw 'MuseTalk source manifest is missing. Re-sync the complete project.'
+    }
+    $Manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $Vendor = Join-Path $Root 'third_party/MuseTalk'
+    $Missing = @()
+    $Changed = @()
+    $Count = 0
+    foreach ($Entry in $Manifest.files.PSObject.Properties) {
+        $Count++
+        $SourceFile = Join-Path $Vendor $Entry.Name
+        if (-not (Test-Path -LiteralPath $SourceFile -PathType Leaf)) {
+            $Missing += $Entry.Name
+        } elseif ((Get-FileHash -LiteralPath $SourceFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Entry.Value) {
+            $Changed += $Entry.Name
+        }
+    }
+    if ($Count -eq 0) { throw 'MuseTalk source manifest contains no files. Re-sync the complete project.' }
+    if ($Missing.Count -gt 0 -or $Changed.Count -gt 0) {
+        throw "MuseTalk bundled source is incomplete or changed. Missing: $($Missing -join ', '); modified: $($Changed -join ', '). Re-sync third_party/MuseTalk, including musetalk/models/*.py."
+    }
+    Write-Host "MuseTalk bundled source verified ($Count files)."
 }
 
 function Set-ProjectEnvironment {

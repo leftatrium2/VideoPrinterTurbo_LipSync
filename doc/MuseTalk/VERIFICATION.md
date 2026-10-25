@@ -83,3 +83,19 @@ third_party/MuseTalk/musetalk/models/vae.py
 
 新增不响应关闭通知的 worker 测试，验证等待超时后依旧强制回收，避免优雅关闭导致服务挂住。这些测试验证进程管理，不替代服务器下一次实际推理后的退出复验。
 本次全量回归：**50 passed，0 skipped，退出码 0**，耗时 38.29 秒。真实信号量用例从同样的警告失败变为无警告通过，未使用警告过滤或手动注销来隐藏问题。
+
+## Linux 问题对原生 Windows 安装链路的复查
+
+| 问题 | Windows 结论与处理 |
+| --- | --- |
+| Git 忽略 models 源码目录 | 与平台无关。`/models/` 规则已修复；Windows 安装新增纯 PowerShell 源码 SHA-256 预检，在下载 Conda/安装包之前运行，启动入口也检查源码。 |
+| 初始化仅显示汇总异常 | 两个平台共用检查脚本。失败时现在直接输出 worker 日志最后 80 行，日志不存在时明确提示，不掩盖原异常。 |
+| 音视频时长差超过 150ms | 与平台无关，只影响严格推理模式。Windows 新增 `scripts/smoke_musetalk.ps1 -Timeline audio`，并自动配置 Conda DLL/FFmpeg 路径。安装仍只检查初始化。 |
+| 正常退出被强杀 | 优雅关闭修复由两平台共用。新增模拟测试确认先发送关闭通知并等待 worker，再关闭 Windows Job Object；POSIX 同款命名信号量警告不等于 Windows 必然会出现相同警告。 |
+
+`install.bat`、`start.bat` 选择系统 64 位 PowerShell，从 32 位终端调用时使用 Sysnative，并保留脚本失败退出码。架构守卫同时考虑 WOW64 环境变量。Windows 脚本使用 CRLF，内置上游文件仍保留原始字节。
+
+持久化 PowerShell 检查实际执行了完整 75 文件校验，以及缺清单、缺源码、源码哈希改变、路径包含空格、原生命令返回非零退出码等用例；解析安装、启动、公共函数及 Windows 验证入口，并确认源码检查位于下载/安装调用之前。
+日志尾部输出测试、Job Object 关闭顺序测试通过。全量回归：**53 passed，0 skipped，退出码 0**，耗时 38.78 秒。
+
+上述 PowerShell 检查使用 macOS 上的 PowerShell 7.6.8，Windows API 用例仍使用模拟接口。没有在本机执行 Miniforge Windows 安装器、Windows PowerShell 5.1、原生 Windows CUDA/DLL 加载、目录联接或真实 GPU 推理；这些仍需 Windows 实机验收。

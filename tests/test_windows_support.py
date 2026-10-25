@@ -94,6 +94,27 @@ def test_engine_closes_job_even_when_worker_has_already_exited():
     assert calls == ['close']
 
 
+def test_normal_windows_job_close_happens_after_graceful_worker_exit(monkeypatch):
+    from lipsync_service import musetalk_engine
+    events = []
+    alive = [True]
+    def join(timeout):
+        events.append('join')
+        alive[0] = False
+    process = SimpleNamespace(pid=123, is_alive=lambda: alive[0], join=join,
+                              close=lambda: events.append('process-close'),
+                              kill=lambda: pytest.fail('Normal shutdown must not force-kill the worker'))
+    monkeypatch.setattr(musetalk_engine.os, 'getpgid', lambda pid: 0, raising=False)
+    engine = MuseTalkEngine()
+    engine._process, engine._loaded = process, True
+    engine._connection = SimpleNamespace(send=lambda message: events.append(('send', message)),
+                                          close=lambda: events.append('pipe-close'))
+    engine._windows_job = SimpleNamespace(close=lambda: events.append('job-close'))
+    engine.close()
+    assert events[0] == ('send', None)
+    assert events.index('join') < events.index('job-close') < events.index('process-close')
+
+
 def test_real_worker_startup_gate_and_initialization_failure(tmp_path):
     engine = MuseTalkEngine(model_dir=tmp_path / 'missing-models', runtime_dir=tmp_path / 'runtime',
                             startup_timeout=15)

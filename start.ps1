@@ -9,6 +9,7 @@ try {
     Assert-WindowsX64
     Push-Location $PSScriptRoot
     try {
+        Assert-BundledSource -Root $PSScriptRoot
         $Prefix = Join-Path $PSScriptRoot '.conda\musetalk'
         $Python = Join-Path $Prefix 'python.exe'
         if (-not (Test-Path -LiteralPath $Python)) { throw 'Run install.bat first.' }

@@ -8,3 +8,4 @@
 /install.ps1 text eol=crlf
 /start.ps1 text eol=crlf
 /scripts/windows_common.ps1 text eol=crlf
+/scripts/smoke_musetalk.ps1 text eol=crlf

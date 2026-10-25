@@ -4,10 +4,22 @@ import json
 import os
 import shutil
 import sys
+from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+
+def print_worker_log(log_path, lines=80):
+    print(f'MuseTalk worker log (last {lines} lines): {log_path}', file=sys.stderr)
+    try:
+        with Path(log_path).open(encoding='utf-8', errors='replace') as log:
+            tail = deque(log, maxlen=lines)
+        for line in tail:
+            print(line, end='', file=sys.stderr)
+    except OSError as exc:
+        print(f'Worker log unavailable: {exc}', file=sys.stderr)
 
 
 def main():
@@ -46,7 +58,11 @@ def main():
                                 batch_size=int(os.environ.get('LIPSYNC_BATCH_SIZE', '1')),
                                 use_float16=os.environ.get('LIPSYNC_FLOAT16', '1') == '1')
         try:
-            engine.start()
+            try:
+                engine.start()
+            except Exception:
+                print_worker_log(Path(engine.settings['runtime']) / 'worker.log')
+                raise
             print('MuseTalk v15 initialized successfully. Video quality still requires a real inference test.')
         finally:
             engine.close()

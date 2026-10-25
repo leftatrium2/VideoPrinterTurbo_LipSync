@@ -51,5 +51,9 @@
 - [x] 父进程持有 kill-on-close Job Object，初始化门控确保子进程先纳管再加载模型。
 - [x] 保留内置上游文件原始字节，避免 Windows Git 换行转换破坏源码哈希。
 - [x] PowerShell 解析、失败传播及跨平台资源管理回归。
+- [x] 将 Windows 源码 SHA-256 预检前置到所有下载/安装步骤之前，并显示初始化失败日志尾部。
+- [x] 检查 64 位 PowerShell/Sysnative 入口、WOW64 架构识别、退出码与 CRLF。
+- [x] 增加配置 Conda DLL/FFmpeg 路径的 Windows 视频验证入口，支持 `-Timeline audio`。
+- [x] 验证正常退出先等待 worker，再关闭 Job Object；全量回归增至 53 项通过。
 - [ ] 在原生 Windows 10/11 x64 + NVIDIA 环境完整安装，并实际验证 CUDA/MMCV、模型加载和输出质量。
 - [ ] 在 Windows 实测目录联接、Job Object、超时/崩溃恢复和正常退出后的 GPU/FFmpeg 回收。

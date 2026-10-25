@@ -36,6 +36,16 @@ $env:LIPSYNC_API_KEY = 'replace-with-your-own-key'
 
 Direct entry point: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`; use `start.ps1` to launch. Native Windows installation, DLL loading, junctions, Job Objects and real GPU inference still require validation on Windows hardware. macOS checks do not establish those guarantees.
 
+Both installation and startup verify all 75 bundled source files. Installation checks them before downloading Miniforge or installing dependencies, so missing `musetalk/models/*.py` fails immediately. Model initialization failure prints the worker log tail; manual inspection: `Get-Content .runtime\musetalk\worker.log -Tail 160`. Batch entry points select 64-bit PowerShell and preserve failure exit codes.
+
+For real video verification, use the Windows wrapper that also sets Conda DLL/FFmpeg paths:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\smoke_musetalk.ps1 -Video "D:\media\speaker.mp4" -Audio "D:\media\voice.wav" -Output "storage\verification\speaker_audio.mp4" -Timeline audio
+```
+
+`-Timeline audio` corresponds to Linux's `--timeline audio` and accepts different input durations. It runs twice by default; add `-Repeat 1` for one run. Outputs must use new filenames. The default strict mode retains the 150ms duration requirement; that rejection is not a Windows installation failure.
+
 ### Ubuntu
 
 Prerequisites: a working NVIDIA driver (`nvidia-smi`) and Conda in PATH. Installing system libraries may require sudo. The installer uses PyTorch cu118 wheels and checks CUDA/MMCV operations; a separate CUDA Toolkit installation is not required for the selected wheels.

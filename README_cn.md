@@ -41,6 +41,16 @@ $env:LIPSYNC_API_KEY = 'replace-with-your-own-key'
 
 也可运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`；启动时替换为 `start.ps1`。Windows 安装、DLL 加载、目录联接、Job Object 和真实 GPU 推理仍需在原生 Windows 机器实测，本地 macOS 检查不能替代这些验收。
 
+安装和启动入口都会校验 75 个内置源码文件；安装时该检查位于下载 Miniforge、安装依赖之前，缺少 `musetalk/models/*.py` 会立即报错。初始化失败会直接打印 worker 日志尾部；也可手动执行 `Get-Content .runtime\musetalk\worker.log -Tail 160`。批处理入口会优先使用 64 位 PowerShell，并保留失败退出码。
+
+Windows 上验证真实视频时，使用已包含 Conda DLL/FFmpeg 环境配置的入口：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\smoke_musetalk.ps1 -Video "D:\media\speaker.mp4" -Audio "D:\media\voice.wav" -Output "storage\verification\speaker_audio.mp4" -Timeline audio
+```
+
+`-Timeline audio` 对应 Linux 的 `--timeline audio`，允许音视频长度不同，默认连续验证两次；增加 `-Repeat 1` 可只执行一次。输出文件必须尚未存在。默认 strict 模式仍要求时长差不超过 150ms；该要求不是 Windows 安装错误。
+
 ### Ubuntu
 
 前提：Ubuntu、能正常运行 `nvidia-smi` 的 NVIDIA 驱动，以及 PATH 中可用的 Conda。首次安装系统库可能要求 sudo 密码；无需另装 CUDA Toolkit，使用 PyTorch cu118 wheel。驱动需与该运行时兼容，安装脚本会实际检查 CUDA 和 MMCV 算子。
