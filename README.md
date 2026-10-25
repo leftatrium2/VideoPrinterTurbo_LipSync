@@ -100,7 +100,7 @@ Preprocessing still stores decoded images and reads the complete clip into memor
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LIPSYNC_HOST` | `127.0.0.1` | Launcher bind address |
+| `LIPSYNC_HOST` | `0.0.0.0` | Linux/Windows launcher bind address; overridable with the environment variable |
 | `LIPSYNC_PORT` | `8081` | Launcher port |
 | `LIPSYNC_GPU` | `0` | CUDA_VISIBLE_DEVICES, normally one GPU index |
 | `LIPSYNC_BATCH_SIZE` | `1` | Inference batch size |

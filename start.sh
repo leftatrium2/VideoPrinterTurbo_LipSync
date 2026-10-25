@@ -12,5 +12,5 @@ export LIPSYNC_ENGINE=musetalk
 # Avoid accidentally selecting the legacy command backend in an old shell.
 unset LIPSYNC_COMMAND
 export LIPSYNC_STORAGE="${LIPSYNC_STORAGE:-$ROOT/storage}"
-exec "$PYTHON" -m uvicorn app:app --host "${LIPSYNC_HOST:-127.0.0.1}" \
+exec "$PYTHON" -m uvicorn app:app --host "${LIPSYNC_HOST:-0.0.0.0}" \
   --port "${LIPSYNC_PORT:-8081}" --workers 1 --timeout-graceful-shutdown 4200

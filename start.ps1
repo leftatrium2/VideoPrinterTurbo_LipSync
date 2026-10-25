@@ -17,7 +17,7 @@ try {
         $env:LIPSYNC_ENGINE = 'musetalk'
         Remove-Item Env:LIPSYNC_COMMAND -ErrorAction SilentlyContinue
         if (-not $env:LIPSYNC_STORAGE) { $env:LIPSYNC_STORAGE = Join-Path $PSScriptRoot 'storage' }
-        $BindAddress = if ($env:LIPSYNC_HOST) { $env:LIPSYNC_HOST } else { '127.0.0.1' }
+        $BindAddress = if ($env:LIPSYNC_HOST) { $env:LIPSYNC_HOST } else { '0.0.0.0' }
         $Port = if ($env:LIPSYNC_PORT) { $env:LIPSYNC_PORT } else { '8081' }
         Invoke-Checked -Executable $Python -Arguments @('-m', 'uvicorn', 'app:app', '--host', $BindAddress,
             '--port', $Port, '--workers', '1', '--timeout-graceful-shutdown', '4200')

@@ -108,7 +108,7 @@ bash start.sh
 
 | 环境变量 | 默认值 | 含义 |
 | --- | --- | --- |
-| `LIPSYNC_HOST` | `127.0.0.1` | 启动脚本监听地址 |
+| `LIPSYNC_HOST` | `0.0.0.0` | Linux/Windows 启动脚本监听地址，可通过环境变量覆盖 |
 | `LIPSYNC_PORT` | `8081` | 启动脚本监听端口 |
 | `LIPSYNC_GPU` | `0` | CUDA_VISIBLE_DEVICES 值，通常为一个 GPU 序号 |
 | `LIPSYNC_BATCH_SIZE` | `1` | 推理批大小 |
