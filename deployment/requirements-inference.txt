@@ -1,0 +1,26 @@
+# Inference-only baseline, not a lock exported from the user's working server.
+# torch/torchvision/torchaudio and mmcv are installed separately from CUDA wheels.
+diffusers==0.30.2
+accelerate==0.28.0
+numpy==1.23.5
+opencv-python==4.9.0.80
+soundfile==0.12.1
+transformers==4.39.2
+huggingface-hub==0.30.2
+librosa==0.11.0
+einops==0.8.1
+omegaconf==2.3.0
+Pillow==10.4.0
+scipy==1.10.1
+numba==0.60.0
+llvmlite==0.43.0
+scikit-image==0.21.0
+scikit-learn==1.3.2
+matplotlib==3.7.5
+chumpy==0.70
+xtcocotools==1.14.3
+mmengine==0.10.7
+mmdet==3.1.0
+mmpose==1.1.0
+fastapi==0.115.6
+uvicorn==0.32.1

@@ -33,6 +33,28 @@ def ffmpeg(args):
                    capture_output=True, check=True, timeout=1800)
 
 
+def validate_inputs(video: Path, audio: Path) -> float:
+    duration = probe(video, 'video')
+    if abs(duration - probe(audio, 'audio')) > .15:
+        raise ValueError('Video and audio must share a timeline (maximum duration difference 150ms)')
+    return duration
+
+
+def finalize_output(raw: Path, audio: Path, output: Path, duration: float):
+    if not raw.is_file() or not raw.stat().st_size:
+        raise ValueError('Model did not create a nonempty output MP4')
+    if abs(probe(raw, 'video') - duration) > .15:
+        raise ValueError('Model changed the video timeline')
+    ffmpeg(['-i', raw, '-map', '0:v:0', '-f', 'null', '-'])
+    ffmpeg(['-i', raw, '-i', audio, '-map', '0:v:0', '-map', '1:a:0',
+            '-c:v', 'copy', '-c:a', 'aac', '-movflags', '+faststart', output])
+    if abs(probe(output, 'video') - duration) > .15:
+        raise ValueError('Final output duration mismatch')
+    probe(output, 'audio')
+    ffmpeg(['-i', output, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'])
+    raw.unlink()
+
+
 class CommandEngine:
     def __init__(self, command: list[str], timeout: float):
         self.command, self.timeout = command, timeout
@@ -42,9 +64,7 @@ class CommandEngine:
         return bool(self.command)
 
     def run(self, video: Path, audio: Path, output: Path):
-        duration = probe(video, 'video')
-        if abs(duration - probe(audio, 'audio')) > .15:
-            raise ValueError('Video and audio must share a timeline (maximum duration difference 150ms)')
+        duration = validate_inputs(video, audio)
         raw = output.with_name('model-output.mp4')
         values = {'video': str(video), 'audio': str(audio), 'output': str(raw)}
         # No shell, and no client-supplied flags or commands.
@@ -68,15 +88,4 @@ class CommandEngine:
                 raise
             if code:
                 raise subprocess.CalledProcessError(code, command)
-        if not raw.is_file() or not raw.stat().st_size:
-            raise ValueError('Model did not create a nonempty output MP4')
-        if abs(probe(raw, 'video') - duration) > .15:
-            raise ValueError('Model changed the video timeline')
-        ffmpeg(['-i', raw, '-map', '0:v:0', '-f', 'null', '-'])
-        ffmpeg(['-i', raw, '-i', audio, '-map', '0:v:0', '-map', '1:a:0',
-                '-c:v', 'copy', '-c:a', 'aac', '-movflags', '+faststart', output])
-        if abs(probe(output, 'video') - duration) > .15:
-            raise ValueError('Final output duration mismatch')
-        probe(output, 'audio')
-        ffmpeg(['-i', output, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'])
-        raw.unlink()
+        finalize_output(raw, audio, output, duration)

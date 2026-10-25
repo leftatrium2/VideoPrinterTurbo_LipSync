@@ -1,93 +1,143 @@
-<div align="center">
-<h1 align="center">VideoPrinterTurbo_LipSync</h1>
-<br>
-<h3><a href="README.md">English</a> | 简体中文</h3>
-<br>
-</div>
 # VideoPrinterTurbo_LipSync
 
-供 VideoPrinterTurbo 调用的本地 LipSync 后端，使用 Python 3.11–3.12、uv、FastAPI 和 Uvicorn，仅提供 API，无前台界面。
+[English](README.md) | 简体中文
 
-## 启动
+供 VideoPrinterTurbo 调用的本地口型同步后端，使用内置 MuseTalk 1.5（`v15`）、FastAPI 和 Uvicorn，无前台界面。用户只部署本项目，无需另行克隆 MuseTalk 或配置推理命令。
 
-依赖已配置完成。当前本机已验证的启动命令（在项目根目录执行）：
+部署目标为 **Ubuntu x86_64 或原生 Windows 10/11 x64 + NVIDIA GPU + Python 3.10**。Windows 使用原生 PowerShell/批处理入口。本地协议和进程测试已实现；干净系统安装、真实 GPU 推理及口型质量仍需在目标机器验收。内置源码尚未与原服务器成功环境核对，详见 [实施清单](doc/MuseTalk/INTEGRATION_TODO.md)。
 
-```sh
-/Users/sunxiao5/.local/bin/uv run /Users/sunxiao5/opensource/agent/VideoPrinterTurbo_LipSync/.venv/bin/python -m uvicorn app:app --port 8081
+## 安装与启动
+
+### Windows
+
+前提：64 位 Windows 10/11 和 NVIDIA 驱动，`nvidia-smi.exe` 可用。将项目解压到较短的英文路径，例如 `D:\VideoPrinterTurbo_LipSync`，避免 Conda/OpenCV 对中文目录和长路径的兼容问题。
+
+1. 双击 `install.bat`，等待安装和模型初始化完成。
+2. 双击 `start.bat`，保持窗口打开。
+3. 打开 <http://127.0.0.1:8081/docs>，或访问 `/health` 检查就绪状态。
+
+也可以在项目目录执行：
+
+```powershell
+.\install.bat
+.\start.bat
 ```
 
-默认仅监听本机，端口 8081 避开 VideoPrinterTurbo 的 8080。
-跨机器调用时可将 `--host` 改为 `0.0.0.0`。
+脚本复用可用的 Conda；找不到时自动下载固定版本、SHA-256 校验的 Miniforge 到项目 `.tools/miniforge`，不注册为默认 Python。创建项目内 `.conda/musetalk` Python 3.10 环境，通过 conda-forge 安装 FFmpeg 和 VC++ 运行库，并安装 PyTorch cu118、MMCV 和 xtcocotools 的 Windows 预编译包。无需安装编译工具链或单独配置系统 FFmpeg。每一步失败都会停止，不会继续输出安装成功。
 
-## 接口
+Windows 的模型资源使用目录联接，S3FD 缓存使用硬链接或复制，无需开启开发者模式来创建符号链接。推理进程由 Windows Job Object 管理，用于回收推理和 FFmpeg 子进程。`.bat` 启动器只对当前 PowerShell 进程设置脚本执行策略。
 
-```sh
+可在同一个 PowerShell 窗口设置镜像、代理或服务配置，然后执行脚本：
+
+```powershell
+$env:HF_ENDPOINT = 'https://hf-mirror.com'
+# 可选，地址必须在当前 Windows 机器上可用
+# $env:HTTPS_PROXY = 'http://127.0.0.1:7890'
+.\install.bat
+$env:LIPSYNC_HOST = '0.0.0.0'
+$env:LIPSYNC_API_KEY = 'replace-with-your-own-key'
+.\start.bat
+```
+
+也可运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`；启动时替换为 `start.ps1`。Windows 安装、DLL 加载、目录联接、Job Object 和真实 GPU 推理仍需在原生 Windows 机器实测，本地 macOS 检查不能替代这些验收。
+
+### Ubuntu
+
+前提：Ubuntu、能正常运行 `nvidia-smi` 的 NVIDIA 驱动，以及 PATH 中可用的 Conda。首次安装系统库可能要求 sudo 密码；无需另装 CUDA Toolkit，使用 PyTorch cu118 wheel。驱动需与该运行时兼容，安装脚本会实际检查 CUDA 和 MMCV 算子。
+
+在本项目根目录执行：
+
+```bash
+bash install.sh
+bash start.sh
+```
+
+安装脚本会创建项目内 `.conda/musetalk` Python 3.10 环境，安装 PyTorch 2.0.1/CUDA 11.8 和 MMCV 2.0.1 等依赖，下载并校验完整推理权重，最后执行模型初始化检查。已有开发 `.venv` 不会被替换。此依赖清单是集成基准，尚不是从成功服务器导出的完整锁定环境。
+
+权重约数 GB，存放在 `models/`，不提交 Git；包含 v15 UNet、VAE、Whisper、DWPose、BiSeNet、ResNet18 和 S3FD。不下载 v1、训练用 SyncNet 或演示素材。下载支持断点续传及校验后跳过；中断后重新运行安装脚本即可。Hugging Face 文件按固定仓库提交下载，校验方式见 [第三方来源](third_party/README.md)。
+
+如模型站点访问受限，可在安装前设置镜像或你服务器上实际可用的代理：
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+# 可选：代理地址必须能从这台部署机器访问
+# export HTTPS_PROXY=http://127.0.0.1:7890
+bash install.sh
+```
+
+启动时先加载模型；加载失败则终止启动，具体信息见 `.runtime/musetalk/worker.log`。模型加载成功后才开始接收 HTTP 请求：
+
+```bash
 curl http://127.0.0.1:8081/
+curl http://127.0.0.1:8081/health
 ```
 
-`GET /` 返回：
+`GET /` 保持原返回 `{"code":0,"msg":"success","data":{}}`；`/health` 就绪时返回 `{"ready":true}` 和 HTTP 200，恢复中或不可用时返回 `{"ready":false}` 和 HTTP 503。接口文档位于 `/docs`，传输契约见 [API.md](API.md)。
 
-```json
-{"code": 0, "msg": "success", "data": {}}
-```
+跨机器调用：
 
-FastAPI 自动生成的接口文档：<http://127.0.0.1:8081/docs>。
-
-## 目录
-
-- `app.py`：应用配置、生命周期、应用工厂与路由注册。
-- `routers/index.py`：根接口；`routers/lipsync.py`：上传、任务、结果下载 API 与鉴权。
-- `lipsync_service/`：推理命令执行、任务队列与存储管理。
-- `utils/`：响应封装与公共常量，沿用 VideoPrinterTurbo 的成功响应格式。
-- `pyproject.toml`：uv 依赖配置；首次成功执行 `uv sync` 后生成 `uv.lock`。
-
-现已提供断点上传、串行任务队列、结果续传和命令式模型接入。HTTP 契约见 [API.md](API.md)。
-模型及权重需在 CUDA 机器单独安装；本仓库不内置模型，也不会用普通音画封装冒充口型同步。
-
-
-## CUDA 服务部署
-
-在项目目录执行 `uv sync`，安装 FFmpeg/ffprobe 并确保在 PATH 中。
-使用模型自己的 Python 环境及推理脚本，通过 JSON 参数数组配置命令：
-
-```sh
-export LIPSYNC_COMMAND='["/opt/model/.venv/bin/python", "/opt/model/run_lipsync.py", "--video", "{video}", "--audio", "{audio}", "--output", "{output}"]'
+```bash
+export LIPSYNC_HOST=0.0.0.0
 export LIPSYNC_API_KEY='replace-with-your-own-key'
-uv run python -m uvicorn app:app --host 0.0.0.0 --port 8081 --workers 1
+bash start.sh
 ```
 
-上述脚本路径和参数是**接入约定示例**，需替换为实际模型脚本，不是仓库内置脚本。
-命令必须包含 `{video}`、`{audio}`、`{output}`，服务替换为绝对路径；不启动 shell。
-脚本必须阻塞直到推理结束，成功返回 0，并在 `{output}` 写出非空 MP4。
-脚本应使用绝对配置/权重路径；工作目录是本服务启动目录。
-输入已对齐，禁止通过循环、变速、截断改变时间线。后台验证视频时长和完整解码，
-然后保留模型画面，用上传配音重新封装音轨并验证结果。模型输出本身的口型质量仍需人工验收。
+## 推理行为
 
-未配置命令时根接口可用，但提交任务返回 HTTP 503。
-模型错误、缺少 FFmpeg、无输出、时长变化或解码失败均使任务进入 `failed`，不提供结果下载。
-任务 ID 与异常类型写入服务日志；模型标准输出/错误保存在该任务临时目录的 `inference.log`，
-随任务过期删除。HTTP 错误不会暴露模型命令及日志。
+模型运行在常驻 Python 子进程中，通过进程间通信接收任务，直接调用内置 MuseTalk 模块。连续任务复用已加载权重；没有启动 `scripts.inference` 命令行。视频解码、编码和音轨封装继续使用 FFmpeg。
+
+同一 GPU 串行推理，只启动一个 HTTP worker。模型超时或任务失败会回收推理进程及其 FFmpeg 子进程，并重新加载模型；失败任务保持 failed，不自动重复执行。空闲进程意外退出也会自动恢复，恢复失败每 30 秒重试。模型恢复期间健康检查和新任务提交可能返回 503。队列中的任务按原顺序处理，恢复失败时相应任务可能失败。
+
+输入视频须为恒定帧率、有可检测人脸的视频；音频须与视频共享起点，时长差不超过 150ms。输出保持原视频帧数、顺序和帧率，不循环、变速或截断画面。29.97 等小数帧率保留其音频采样时间；变帧率视频或检测不到人脸的帧会导致任务失败。结果经过完整解码、时长校验，并使用上传音频封装音轨。真实口型效果需人工播放检查。
+
+当前实现仍会将视频帧写入任务临时目录，并在预处理中读取整段帧；长视频需要充足内存和磁盘。任务目录隔离，结束后按 TTL 清理。重启会清除旧任务状态和临时运行数据，客户端需要重新上传和提交。
+
+## 配置
 
 | 环境变量 | 默认值 | 含义 |
 | --- | --- | --- |
-| `LIPSYNC_COMMAND` | `[]` | 推理命令 JSON 数组 |
-| `LIPSYNC_API_KEY` | 空 | 非空时 `/v1` 接口必须带 Bearer 密钥 |
-| `LIPSYNC_STORAGE` | `storage` | 临时文件根目录，相对启动目录 |
-| `LIPSYNC_INFERENCE_TIMEOUT` | 3600 | 单次模型命令超时，秒 |
-| `LIPSYNC_TTL` | 86400 | 未提交上传、已结束任务的空闲保留时长，秒 |
-| `LIPSYNC_CAPACITY` | 32 | 包括未提交和已结束会话的最大总数 |
-| `LIPSYNC_MAX_FILE` | 5368709120 | 每个输入文件上限，字节 |
-| `LIPSYNC_CHUNK_SIZE` | 8388608 | 单个上传请求上限，字节 |
+| `LIPSYNC_HOST` | `127.0.0.1` | 启动脚本监听地址 |
+| `LIPSYNC_PORT` | `8081` | 启动脚本监听端口 |
+| `LIPSYNC_GPU` | `0` | CUDA_VISIBLE_DEVICES 值，通常为一个 GPU 序号 |
+| `LIPSYNC_BATCH_SIZE` | `1` | 推理批大小 |
+| `LIPSYNC_FLOAT16` | `1` | 1 使用 FP16；0 使用 FP32 |
+| `LIPSYNC_MODEL_DIR` | 项目下 models | 权重根目录，建议绝对路径 |
+| `LIPSYNC_STARTUP_TIMEOUT` | `600` | 模型加载超时，秒 |
+| `LIPSYNC_INFERENCE_TIMEOUT` | `3600` | 模型推理超时，秒；媒体校验另有超时 |
+| `LIPSYNC_API_KEY` | 空 | `/v1` 接口 Bearer 密钥 |
+| `LIPSYNC_STORAGE` | 项目下 storage | 启动脚本的临时存储目录 |
+| `LIPSYNC_TTL` | `86400` | 未提交或已结束会话保留时长，秒 |
+| `LIPSYNC_CAPACITY` | `32` | 会话总容量 |
+| `LIPSYNC_MAX_FILE` | `5368709120` | 单个输入文件上限，字节 |
+| `LIPSYNC_CHUNK_SIZE` | `8388608` | 单个上传请求上限，字节 |
 
-只启动一个 worker。同一存储目录有进程锁，第二个实例启动失败；同一 GPU 也只部署一个实例。
-元数据及队列只在内存中，重启后旧 ID 返回 404；启动时清理该存储目录的遗留运行文件。
-正常退出等待当前任务结束（或命令超时），丢弃其余队列并清理临时文件。
-运行中的任务和下载不会被 TTL 清理，查询进度和下载会刷新保留时间。
-上传和下载支持网络中断后继续；服务端重启后的恢复是重新上传和提交，不恢复旧推理。
+Python 服务默认选择 MuseTalk；`start.sh` / `start.ps1` 会明确选择 MuseTalk，并清除旧的 `LIPSYNC_COMMAND`。自定义部署仍可用 `LIPSYNC_ENGINE=command` 和 `LIPSYNC_COMMAND` JSON 数组接入其他模型，约定为 `{video}`、`{audio}`、`{output}` 三个绝对路径占位符。该模式用于兼容，不是正常 MuseTalk 部署所需步骤。
+
+## 原服务器基准与 GPU 验收
+
+先在已跑通的服务器激活原环境，执行本项目脚本。它只读取原 MuseTalk 目录，记录写入本项目：
+
+```bash
+conda activate musetalk
+bash scripts/capture_baseline.sh "$HOME/apps/MuseTalk"
+```
+
+对比 `deployment-records/server-baseline/musetalk.commit.txt` 与 `third_party/MuseTalk.source.json` 的提交号，并核对依赖和模型哈希。版本不一致时需要先评估差异，不能直接认为已经复现原环境。安装成功后的新环境记录位于 `deployment-records/`。
+
+部署后使用原有测试素材执行两次真实推理，检查模型复用：
+
+```bash
+.conda/musetalk/bin/python scripts/smoke_musetalk.py \
+  --video /absolute/path/speaker.mp4 \
+  --audio /absolute/path/voice.wav \
+  --output "$PWD/storage/verification/speaker_synced.mp4"
+```
+
+默认生成两个输出及 `.verification.json`，输出文件名必须是新的。脚本验证时长、解码、音轨并记录耗时和进程号；需要人工播放输出，对照原结果检查口型、脸部融合和音画同步。该步骤通过后，再通过 HTTP 上传到下载跑一次完整链路。初始化成功不能替代这些验收。
 
 ## VideoPrinterTurbo 调用
 
-在 VideoPrinterTurbo 的 `server/` 目录：
+客户端接口保持不变，在 VideoPrinterTurbo 的 `server/` 中使用：
 
 ```python
 import os
@@ -106,31 +156,24 @@ service = RemoteLipSync(
 result = service.lip_sync("speaker.mp4", "final_voice.wav", "speaker_synced.mp4")
 ```
 
-配置通过构造函数显式传入，与现有云端适配器一致，不改数据库或前端配置。
-HTTP(S) 可用于自建服务地址；客户端直接连接，不读取环境代理。
-若调小服务端分块上限，也需相应调小客户端 `chunk_size`。
-结果路径必须是新的 `.mp4`，输入须共享起点且时长差不超过 150ms。
-每个并发调用使用独立客户端实例，且输出路径不同。
+支持上传/下载续传、提交幂等和 SHA-256 校验；检查点不保存密钥。失败任务不会自动重做；主动重试需移除客户端检查点或换新输出路径。本次未修改客户端项目、PipelineManager、数据库或前台。
 
-客户端在结果旁保存 `.lipsync.json` 检查点与 `.lipsync.part` 下载文件，不保存密钥。
-中断后以相同输入、服务地址及输出路径再次调用即可继续，换输入时自动重建会话。
-输入改变或会话过期时，旧服务端文件等待 TTL 清理。失败任务保留原 ID，不自动重复推理；
-需主动重试失败任务时，移除本地检查点或改用新输出路径。
-`last_job_id` 提供最近任务 ID。本地超时不会取消远程任务。
-成功后校验 SHA-256、音视频流、时长和完整解码，原子发布结果并删除检查点、下载临时文件。
-`.lipsync.lock` 是保留的轻量锁文件，不代表任务仍在执行；异常退出后 OS 自动释放锁。
-尚未接入 `PipelineManager`，不新增任务字段或前端入口。
+## 本地测试与目录
 
-## 验证
+`pyproject.toml` / `uv.lock` 管理轻量服务开发依赖；GPU 部署使用 `deployment/` 和 `install.sh`，仅执行 `uv sync` 不会安装模型运行环境。完整协议测试读取相邻 `../VideoPrinterTurbo/server` 的真实客户端代码，两个仓库需同级，测试不修改客户端源码。
 
-本仓库测试调用相邻 `../VideoPrinterTurbo/server` 的真实客户端代码，需两个仓库同级。
-可使用已安装 pytest/httpx/requests 的环境，或：
-
-```sh
-uv run --with pytest --with httpx --with requests python -m pytest -q tests
+```bash
+mkdir -p .runtime/tmp
+UV_CACHE_DIR="$PWD/.cache/uv" PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.runtime/tmp" \
+  uv run --with pytest --with httpx --with requests python -m pytest -q tests --basetemp=.runtime/pytest
 ```
 
-测试包含 ASGI 进程内传输和真实 Uvicorn/TCP 两种路径；禁止监听端口的沙箱会跳过 TCP 用例。
-测试引擎使用 FFmpeg 复制画面，**仅验证协议、队列、文件处理和结果返回，不验证口型效果**。
-覆盖上传偏移与校验、响应丢失后的幂等恢复、客户端重启、服务端会话失效、Range/If-Range、
-下载续传与损坏校验、串行排队、模型失败/超时、客户端超时、TTL 清理及进程锁。
+测试中复制画面的引擎仅验证协议与进程管理，不验证模型效果；禁止监听端口的环境会跳过 TCP 用例。
+
+- `third_party/MuseTalk/`：固定提交的上游源码和许可证。
+- `lipsync_service/musetalk_engine.py`：进程生命周期、通信、超时和恢复。
+- `lipsync_service/musetalk_runtime.py`：模型加载、逐帧推理及时间线适配。
+- `lipsync_service/model_assets.py`：下载、续传与权重校验。
+- `deployment/`：推理依赖与权重清单。
+- `scripts/`：环境检查、成功环境记录和真实 GPU 验证。
+- `doc/MuseTalk/INSTALL_cn.md`：历史独立安装步骤，保留供基准对照；新用户使用本文入口。

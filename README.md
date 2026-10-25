@@ -1,92 +1,135 @@
-<div align="center">
-<h1 align="center">VideoPrinterTurbo_LipSync</h1>
-<br>
-<h3>English | <a href="README_cn.md">简体中文</a></h3>
-<br>
-</div>
 # VideoPrinterTurbo_LipSync
 
-A local LipSync backend for VideoPrinterTurbo, using Python 3.11–3.12, uv, FastAPI, and Uvicorn. It provides an API only, with no frontend.
+English | [简体中文](README_cn.md)
 
-## Starting the service
+Local lip-sync backend for VideoPrinterTurbo, with vendored MuseTalk 1.5 (`v15`), FastAPI and Uvicorn. Deploy one project; no separate MuseTalk checkout or inference command configuration is required.
 
-Dependencies are already configured. The following startup command has been verified on the current machine (run from the project root):
+Targets: **Ubuntu x86_64 or native Windows 10/11 x64, NVIDIA GPU, Python 3.10**. Windows uses native PowerShell/batch entry points. Local transport and worker lifecycle tests are available. Clean target-system installation, real CUDA inference and visual quality acceptance remain pending. The vendored commit has not yet been compared with the user's successful server environment. See [integration checklist](doc/MuseTalk/INTEGRATION_TODO.md).
 
-```sh
-/Users/sunxiao5/.local/bin/uv run /Users/sunxiao5/opensource/agent/VideoPrinterTurbo_LipSync/.venv/bin/python -m uvicorn app:app --port 8081
+## Deploy
+
+### Windows
+
+Prerequisites: 64-bit Windows 10/11 and a working NVIDIA Windows driver (`nvidia-smi.exe`). Extract the project to a short ASCII path such as `D:\VideoPrinterTurbo_LipSync` for Conda/OpenCV path compatibility.
+
+Double-click `install.bat`, wait for installation and model initialization, then double-click `start.bat`. Keep the service window open and visit <http://127.0.0.1:8081/docs>. From PowerShell:
+
+```powershell
+.\install.bat
+.\start.bat
 ```
 
-By default, the service listens only on the local machine. Port 8081 avoids a conflict with VideoPrinterTurbo's port 8080.
-For access from other machines, set `--host` to `0.0.0.0`.
+The installer reuses available Conda or downloads a pinned, SHA-256-verified Miniforge into `.tools/miniforge` without registering it as the default Python. It creates `.conda/musetalk` with Python 3.10, installs FFmpeg and VC++ runtime libraries from conda-forge, and installs Windows binary wheels for PyTorch cu118, MMCV and xtcocotools. No compiler toolchain or separate system FFmpeg setup is needed. Failed commands stop installation.
 
-## API
+Directory junctions and detector hard links/copies avoid requiring Developer Mode or symlink privileges. A Windows Job Object owns the model process and descendants for cleanup. Batch entry points set execution policy for their PowerShell process only.
 
-```sh
+Optional settings in the same PowerShell window:
+
+```powershell
+$env:HF_ENDPOINT = 'https://hf-mirror.com'
+# $env:HTTPS_PROXY = 'http://127.0.0.1:7890'
+.\install.bat
+$env:LIPSYNC_HOST = '0.0.0.0'
+$env:LIPSYNC_API_KEY = 'replace-with-your-own-key'
+.\start.bat
+```
+
+Direct entry point: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`; use `start.ps1` to launch. Native Windows installation, DLL loading, junctions, Job Objects and real GPU inference still require validation on Windows hardware. macOS checks do not establish those guarantees.
+
+### Ubuntu
+
+Prerequisites: a working NVIDIA driver (`nvidia-smi`) and Conda in PATH. Installing system libraries may require sudo. The installer uses PyTorch cu118 wheels and checks CUDA/MMCV operations; a separate CUDA Toolkit installation is not required for the selected wheels.
+
+```bash
+bash install.sh
+bash start.sh
+```
+
+The installer creates `.conda/musetalk` with Python 3.10, installs PyTorch 2.0.1 and the MMCV 2.0.1 dependency family, downloads/verifies model assets, then checks actual model initialization. It leaves an existing development `.venv` in place. The inference requirements are an integration baseline, not a full lock exported from the working server.
+
+Weights occupy several GB in `models/`, excluded from Git. The manifest includes the v15 UNet, VAE, Whisper, DWPose, BiSeNet, ResNet18 and S3FD. It excludes v1 and training-only SyncNet. Downloads resume and verified files are skipped. Hugging Face repositories are pinned by commit; integrity details and upstream attribution are in [third_party/README.md](third_party/README.md).
+
+Optional mirror/proxy settings must be reachable from the deployment machine:
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+# export HTTPS_PROXY=http://127.0.0.1:7890
+bash install.sh
+```
+
+Startup loads the model before accepting HTTP requests. Initialization failure aborts startup; inspect `.runtime/musetalk/worker.log`.
+
+```bash
 curl http://127.0.0.1:8081/
+curl http://127.0.0.1:8081/health
 ```
 
-`GET /` returns:
+`GET /` retains `{code:0,msg:"success",data:{}}`. `/health` returns `{"ready":true}` with HTTP 200, or `{"ready":false}` with HTTP 503. Interactive API documentation is at `/docs`; see [API.md](API.md) for transfer semantics.
 
-```json
-{"code": 0, "msg": "success", "data": {}}
-```
+For access from another machine:
 
-Automatically generated FastAPI documentation: <http://127.0.0.1:8081/docs>.
-
-## Project structure
-
-- `app.py`: Application configuration, lifecycle, application factory, and router registration.
-- `routers/index.py`: Root endpoint; `routers/lipsync.py`: Upload, job, result download APIs, and authentication.
-- `lipsync_service/`: Inference command execution, job queue, and storage management.
-- `utils/`: Response wrappers and shared constants, following VideoPrinterTurbo's success response format.
-- `pyproject.toml`: uv dependency configuration; `uv.lock` is generated after the first successful `uv sync`.
-
-The service supports resumable uploads, a serial job queue, resumable result downloads, and command-based model integration. See [API.md](API.md) for the HTTP contract.
-Models and weights must be installed separately on a CUDA machine. This repository does not include a model and does not pass off ordinary audio/video muxing as lip synchronization.
-
-## CUDA service deployment
-
-Run `uv sync` in the project directory, install FFmpeg/ffprobe, and ensure they are on PATH.
-Use the model's own Python environment and inference script, and configure the command as a JSON argument array:
-
-```sh
-export LIPSYNC_COMMAND='["/opt/model/.venv/bin/python", "/opt/model/run_lipsync.py", "--video", "{video}", "--audio", "{audio}", "--output", "{output}"]'
+```bash
+export LIPSYNC_HOST=0.0.0.0
 export LIPSYNC_API_KEY='replace-with-your-own-key'
-uv run python -m uvicorn app:app --host 0.0.0.0 --port 8081 --workers 1
+bash start.sh
 ```
 
-The script path and arguments above are **an example of the integration contract**. Replace them with your actual model script; this script is not included in the repository.
-The command must include `{video}`, `{audio}`, and `{output}`, which the service replaces with absolute paths. No shell is launched.
-The script must block until inference finishes, exit with code 0 on success, and write a nonempty MP4 to `{output}`.
-Use absolute paths for the script's configuration and weights; its working directory is the directory from which this service was started.
-Inputs are already aligned. Do not alter the timeline by looping, changing speed, or truncating them. The backend checks the video duration and performs a full decode,
-then preserves the model's video frames, remuxes the uploaded voiceover as the audio track, and validates the result. The lip-sync quality of the model output still requires manual review.
+## Inference and recovery
 
-Without a configured command, the root endpoint remains available, but job submission returns HTTP 503.
-Model errors, missing FFmpeg, missing output, duration changes, or decoding failures put the job in the `failed` state, with no result available for download.
-The job ID and exception type are written to the service log. Model stdout/stderr are saved to `inference.log` in the job's temporary directory
-and deleted when the job expires. HTTP errors do not expose the model command or logs.
+A persistent spawned Python process loads MuseTalk modules directly and reuses weights across serial jobs. The service does not launch the upstream inference CLI. FFmpeg still handles media decoding, encoding and muxing. Use one HTTP worker and one service instance per GPU.
 
-| Environment variable | Default | Description |
+Timeouts and inference failures recycle the model process and its FFmpeg descendants. Failed jobs stay failed and are never silently retried. A supervisor also recovers idle worker crashes; failed recovery retries every 30 seconds. Health and new submissions may return 503 during recovery. Queued jobs retain ordering and may fail if their initialization attempt fails.
+
+Inputs must share a start time and differ in duration by no more than 150 ms. Videos must have a constant frame rate and detectable faces. Output preserves frame count, order and fractional frame rate; no video looping, speed changes or truncation are used. Missing faces or variable frame rate cause failure. Output is fully decoded, duration-checked and muxed with the uploaded audio. Visual lip-sync quality requires manual review.
+
+Preprocessing still stores decoded images and reads the complete clip into memory; long videos require sufficient RAM and disk. Jobs have isolated temporary directories and TTL cleanup. Metadata/queue are in memory; restart invalidates old IDs and clears abandoned run files.
+
+## Configuration
+
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `LIPSYNC_COMMAND` | `[]` | Inference command as a JSON array |
-| `LIPSYNC_API_KEY` | Empty | When nonempty, `/v1` endpoints require a Bearer token |
-| `LIPSYNC_STORAGE` | `storage` | Root directory for temporary files, relative to the startup directory |
-| `LIPSYNC_INFERENCE_TIMEOUT` | 3600 | Timeout for a single model command, in seconds |
-| `LIPSYNC_TTL` | 86400 | Idle retention period for unsubmitted uploads and finished jobs, in seconds |
-| `LIPSYNC_CAPACITY` | 32 | Maximum total number of sessions, including unsubmitted and finished sessions |
-| `LIPSYNC_MAX_FILE` | 5368709120 | Maximum size of each input file, in bytes |
-| `LIPSYNC_CHUNK_SIZE` | 8388608 | Maximum size of a single upload request, in bytes |
+| `LIPSYNC_HOST` | `127.0.0.1` | Launcher bind address |
+| `LIPSYNC_PORT` | `8081` | Launcher port |
+| `LIPSYNC_GPU` | `0` | CUDA_VISIBLE_DEVICES, normally one GPU index |
+| `LIPSYNC_BATCH_SIZE` | `1` | Inference batch size |
+| `LIPSYNC_FLOAT16` | `1` | 1 for FP16, 0 for FP32 |
+| `LIPSYNC_MODEL_DIR` | project/models | Model root; prefer an absolute path |
+| `LIPSYNC_STARTUP_TIMEOUT` | `600` | Model initialization timeout, seconds |
+| `LIPSYNC_INFERENCE_TIMEOUT` | `3600` | Model inference timeout; media checks have separate limits |
+| `LIPSYNC_API_KEY` | empty | Bearer key for all `/v1` routes |
+| `LIPSYNC_STORAGE` | project/storage | Launcher temporary storage root |
+| `LIPSYNC_TTL` | `86400` | Idle lifetime of unsubmitted/finished sessions, seconds |
+| `LIPSYNC_CAPACITY` | `32` | Total session capacity |
+| `LIPSYNC_MAX_FILE` | `5368709120` | Per-input byte limit |
+| `LIPSYNC_CHUNK_SIZE` | `8388608` | Per-upload-request byte limit |
 
-Run only one worker. A process lock protects the storage directory, so a second instance using the same directory fails to start. Deploy only one instance per GPU as well.
-Metadata and the queue are held only in memory. After a restart, old IDs return 404; leftover runtime files in the storage directory are cleaned up at startup.
-On graceful shutdown, the service waits for the current job to finish (or for the command to time out), discards the remaining queue, and cleans up temporary files.
-Running jobs and active downloads are exempt from TTL cleanup. Progress queries and downloads refresh the retention period.
-Uploads and downloads can resume after network interruptions. After a server restart, recovery requires uploading and submitting again; previous inference jobs are not resumed.
+The Python application defaults to MuseTalk. `start.sh` / `start.ps1` explicitly select it and clears legacy `LIPSYNC_COMMAND`. Custom deployments may retain `LIPSYNC_ENGINE=command` with a JSON argument array in `LIPSYNC_COMMAND`, containing `{video}`, `{audio}` and `{output}` absolute-path placeholders. This compatibility adapter is not needed for normal MuseTalk deployment.
 
-## Calling from VideoPrinterTurbo
+## Server baseline and GPU acceptance
 
-From VideoPrinterTurbo's `server/` directory:
+Inside the original successful Conda environment, run the project script. It reads the original checkout and writes records only into this project:
+
+```bash
+conda activate musetalk
+bash scripts/capture_baseline.sh "$HOME/apps/MuseTalk"
+```
+
+Compare `deployment-records/server-baseline/musetalk.commit.txt` with `third_party/MuseTalk.source.json`, then compare dependencies and weight hashes. Differences must be evaluated before claiming reproduction. New deployment environment records are saved in `deployment-records/`.
+
+After installation, run two consecutive actual GPU jobs on the original test media:
+
+```bash
+.conda/musetalk/bin/python scripts/smoke_musetalk.py \
+  --video /absolute/path/speaker.mp4 \
+  --audio /absolute/path/voice.wav \
+  --output "$PWD/storage/verification/speaker_synced.mp4"
+```
+
+Outputs must use new filenames. The script checks decoding, streams and durations, and records elapsed time, worker PID and hashes in `.verification.json`. Play both outputs to review lip sync, face blending and audio against the original successful result. Then test the complete HTTP upload-to-download path with the real model. Initialization alone is not acceptance.
+
+## VideoPrinterTurbo client
+
+The client interface is unchanged. In VideoPrinterTurbo's `server/` directory:
 
 ```python
 import os
@@ -105,31 +148,18 @@ service = RemoteLipSync(
 result = service.lip_sync("speaker.mp4", "final_voice.wav", "speaker_synced.mp4")
 ```
 
-Configuration is passed explicitly through the constructor, consistent with the existing cloud adapters, without changing database or frontend configuration.
-HTTP(S) is supported for self-hosted service URLs. The client connects directly and ignores proxy environment variables.
-If you lower the server's chunk size limit, lower the client's `chunk_size` accordingly.
-The output must be a new `.mp4` path. Inputs must share the same start time, with a duration difference of no more than 150 ms.
-Use a separate client instance and a different output path for each concurrent call.
+Transfers support resume, idempotent submission and SHA-256 validation. Checkpoints never store keys. A failed job requires removing the checkpoint or choosing a new output to explicitly retry. This change does not modify the client repository, PipelineManager, database or frontend.
 
-The client saves a `.lipsync.json` checkpoint and a `.lipsync.part` download file alongside the result, without storing the API key.
-After an interruption, call again with the same inputs, service URL, and output path to resume. Changing the inputs automatically creates a new session.
-When inputs change or a session expires, old server-side files remain until TTL cleanup. Failed jobs retain their original IDs and do not automatically rerun inference.
-To explicitly retry a failed job, remove the local checkpoint or use a new output path.
-`last_job_id` provides the most recent job ID. A local timeout does not cancel the remote job.
-On success, the client verifies SHA-256, audio/video streams, duration, and full decoding, atomically publishes the result, and deletes the checkpoint and temporary download file.
-`.lipsync.lock` is a lightweight lock file that is kept on disk; its presence does not mean a job is still running. The OS automatically releases the lock after an abnormal exit.
-Integration with `PipelineManager` is not yet implemented; no new job fields or frontend entry points are added.
+## Development verification
 
-## Verification
+`pyproject.toml` and `uv.lock` cover lightweight service development. GPU deployment uses `deployment/` and `install.sh`; `uv sync` alone does not install the model stack. Transport regression tests read the actual client from sibling `../VideoPrinterTurbo/server`, without modifying it.
 
-This repository's tests call the real client code in the adjacent `../VideoPrinterTurbo/server` directory, so the two repositories must be siblings.
-Use an environment with pytest/httpx/requests installed, or run:
-
-```sh
-uv run --with pytest --with httpx --with requests python -m pytest -q tests
+```bash
+mkdir -p .runtime/tmp
+UV_CACHE_DIR="$PWD/.cache/uv" PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.runtime/tmp" \
+  uv run --with pytest --with httpx --with requests python -m pytest -q tests --basetemp=.runtime/pytest
 ```
 
-Tests cover both in-process ASGI transport and real Uvicorn/TCP connections. TCP cases are skipped in sandboxes that prohibit listening on ports.
-The test engine uses FFmpeg to copy video frames. **It verifies only the protocol, queue, file handling, and result delivery, not lip-sync quality.**
-Coverage includes upload offsets and validation, idempotent recovery after lost responses, client restarts, invalidated server sessions, Range/If-Range,
-resumable downloads and corruption detection, serial queuing, model failures/timeouts, client timeouts, TTL cleanup, and process locking.
+Fake copying engines only verify protocol and lifecycle behavior, not lip-sync quality. Sandboxes that disallow local ports skip TCP cases.
+
+Source attribution: [third_party/README.md](third_party/README.md). Historical standalone installation instructions remain in `doc/MuseTalk/INSTALL.md`; new deployments use this README.

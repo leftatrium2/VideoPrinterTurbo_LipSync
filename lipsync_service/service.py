@@ -63,12 +63,18 @@ class Service:
 
     def close(self):
         self.stop.set()
-        self.worker.join()
-        self.cleaner.join()
+        if self.worker.ident is not None:
+            self.worker.join()
+        if self.cleaner.ident is not None:
+            self.cleaner.join()
         try:
-            self.temp.cleanup()
+            if hasattr(self.engine, 'close'):
+                self.engine.close()
         finally:
-            self.storage_lock.close()
+            try:
+                self.temp.cleanup()
+            finally:
+                self.storage_lock.close()
 
     def create(self, payload):
         with self.lock:
@@ -124,7 +130,7 @@ class Service:
             if upload.job_id:
                 return self.job(upload.job_id)
             if not self.engine.ready:
-                raise HTTPException(503, 'LIPSYNC_COMMAND is not configured')
+                raise HTTPException(503, 'LipSync engine is not ready')
             # Hash outside the global lock: multi-GiB inputs must not block other sessions.
             for item in upload.files.values():
                 if item['path'].stat().st_size != item['meta']['size']:

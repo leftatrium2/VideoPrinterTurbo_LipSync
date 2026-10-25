@@ -1,0 +1,10 @@
+# Guard against dependency resolution upgrading the verified upstream ABI family.
+torch==2.0.1
+torchvision==0.15.2
+torchaudio==2.0.2
+numpy==1.23.5
+mmcv==2.0.1
+mmengine==0.10.7
+mmdet==3.1.0
+mmpose==1.1.0
+setuptools==69.5.1

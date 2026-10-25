@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from lipsync_service.engine import CommandEngine
+from lipsync_service.musetalk_engine import MuseTalkEngine, ROOT
 from lipsync_service.service import Service
 from routers.index import router as index_router
 from routers.lipsync import router as lipsync_router
@@ -30,7 +31,24 @@ def create_app(*, engine=None, storage=None, api_key=None, ttl=None, capacity=No
     if command and not all(any('{' + name + '}' in arg for arg in command)
                            for name in ('video', 'audio', 'output')):
         raise ValueError('LIPSYNC_COMMAND requires {video}, {audio}, and {output} placeholders')
-    configured_engine = engine or CommandEngine(command, positive_env('LIPSYNC_INFERENCE_TIMEOUT', 3600))
+    backend = os.environ.get('LIPSYNC_ENGINE', 'musetalk')
+    if backend not in ('musetalk', 'command'):
+        raise ValueError('LIPSYNC_ENGINE must be musetalk or command')
+    if engine is not None:
+        configured_engine = engine
+    elif backend == 'command' or command:
+        configured_engine = CommandEngine(command, positive_env('LIPSYNC_INFERENCE_TIMEOUT', 3600))
+    else:
+        precision = os.environ.get('LIPSYNC_FLOAT16', '1')
+        if precision not in ('0', '1'):
+            raise ValueError('LIPSYNC_FLOAT16 must be 0 or 1')
+        configured_engine = MuseTalkEngine(
+            model_dir=os.environ.get('LIPSYNC_MODEL_DIR', str(ROOT / 'models')),
+            gpu=os.environ.get('LIPSYNC_GPU', '0'),
+            batch_size=positive_env('LIPSYNC_BATCH_SIZE', 1, int),
+            use_float16=precision == '1',
+            timeout=positive_env('LIPSYNC_INFERENCE_TIMEOUT', 3600),
+            startup_timeout=positive_env('LIPSYNC_STARTUP_TIMEOUT', 600))
 
     @asynccontextmanager
     async def lifespan(app):
@@ -43,14 +61,17 @@ def create_app(*, engine=None, storage=None, api_key=None, ttl=None, capacity=No
                           chunk_size=chunk_size if chunk_size is not None else positive_env('LIPSYNC_CHUNK_SIZE',
                                                                                             8 * 1024 ** 2, int))
         app.state.service = service
-        service.start()
         try:
+            if hasattr(configured_engine, 'start'):
+                await asyncio.to_thread(configured_engine.start)
+            service.start()
             yield
         finally:
             await asyncio.to_thread(service.close)
 
     app = FastAPI(title='VideoPrinterTurbo LipSync', version='0.2.0', lifespan=lifespan)
     app.state.api_key = key
+    app.state.engine = configured_engine
     app.include_router(index_router)
     app.include_router(lipsync_router)
     return app

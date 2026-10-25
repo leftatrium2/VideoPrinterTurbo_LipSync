@@ -3,7 +3,7 @@ name = "videoprinterturbo-lipsync"
 version = "0.1.0"
 description = "VideoPrinterTurbo 本地 LipSync 后端服务"
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }
 dependencies = [
     "fastapi==0.115.6",

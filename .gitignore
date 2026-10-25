@@ -4,3 +4,9 @@ __pycache__/
 .DS_Store
 storage/
 .pytest_cache/
+models/
+.runtime/
+.cache/
+.conda/
+deployment-records/
+.tools/
