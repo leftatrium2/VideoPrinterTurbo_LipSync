@@ -135,6 +135,19 @@ bash scripts/capture_baseline.sh "$HOME/apps/MuseTalk"
 
 默认生成两个输出及 `.verification.json`，输出文件名必须是新的。脚本验证时长、解码、音轨并记录耗时和进程号；需要人工播放输出，对照原结果检查口型、脸部融合和音画同步。该步骤通过后，再通过 HTTP 上传到下载跑一次完整链路。初始化成功不能替代这些验收。
 
+如果原 MuseTalk 测试素材的音视频时长不同，验证脚本可增加 `--timeline audio`：
+
+```bash
+.conda/musetalk/bin/python scripts/smoke_musetalk.py \
+  --video "$HOME/apps/MuseTalk/test_inputs/speaker.mp4" \
+  --audio "$HOME/apps/MuseTalk/test_inputs/voice.wav" \
+  --output "$PWD/storage/verification/speaker_audio.mp4" \
+  --timeline audio
+```
+
+该模式按完整音频长度生成视频（取整到视频帧），音频较长时使用原版 MuseTalk 的“正放、倒放”循环帧顺序，音频较短时只生成对应时长的视频。输入文件不变，完整解码、输出时长和音轨校验仍保留。`.verification.json` 记录时间线模式和预期时长。
+默认 `--timeline strict` 仍保留源视频时间线并要求时长差不超过 150ms；错误会在加载模型前提示双方时长。此可选模式用于本地模型验证和直接 Python 引擎调用；当前 HTTP 服务及 VideoPrinterTurbo 客户端继续沿用严格时间线约定。
+
 ## VideoPrinterTurbo 调用
 
 客户端接口保持不变，在 VideoPrinterTurbo 的 `server/` 中使用：

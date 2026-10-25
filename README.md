@@ -127,6 +127,19 @@ After installation, run two consecutive actual GPU jobs on the original test med
 
 Outputs must use new filenames. The script checks decoding, streams and durations, and records elapsed time, worker PID and hashes in `.verification.json`. Play both outputs to review lip sync, face blending and audio against the original successful result. Then test the complete HTTP upload-to-download path with the real model. Initialization alone is not acceptance.
 
+For original MuseTalk test inputs with different video/audio durations, add `--timeline audio`:
+
+```bash
+.conda/musetalk/bin/python scripts/smoke_musetalk.py \
+  --video "$HOME/apps/MuseTalk/test_inputs/speaker.mp4" \
+  --audio "$HOME/apps/MuseTalk/test_inputs/voice.wav" \
+  --output "$PWD/storage/verification/speaker_audio.mp4" \
+  --timeline audio
+```
+
+Audio mode renders to the complete audio duration, quantized to source video frames. Longer audio repeats frames in upstream MuseTalk's forward/reverse cycle; shorter audio generates a shorter result. Inputs are unchanged. Decode, expected output duration and audio-stream checks remain enabled, and the report records the selected timeline.
+The default `--timeline strict` preserves the source timeline and rejects differences over 150 ms before model loading, showing both durations. Audio mode is available for local model verification and direct Python engine calls; the HTTP service and VideoPrinterTurbo client retain their strict timeline contract.
+
 ## VideoPrinterTurbo client
 
 The client interface is unchanged. In VideoPrinterTurbo's `server/` directory:

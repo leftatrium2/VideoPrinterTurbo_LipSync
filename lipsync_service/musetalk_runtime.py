@@ -13,7 +13,7 @@ import tempfile
 from fractions import Fraction
 from pathlib import Path
 
-from .engine import ffmpeg
+from .engine import ffmpeg, probe
 
 
 def video_timing(video):
@@ -41,6 +41,18 @@ def audio_window_indices(frame_count, fps):
     # These are indices into the LEFT-PADDED feature tensor, matching the
     # official two-step look-behind/look-ahead context at integer frame rates.
     return [math.floor(index * step) for index in range(frame_count)]
+
+
+def output_frame_indices(source_count, fps, audio_duration=None):
+    """None keeps the source timeline; audio mode uses upstream's ping-pong cycle."""
+    count = source_count if audio_duration is None else math.floor(audio_duration * fps)
+    if source_count < 1 or count < 1:
+        raise ValueError('Video or audio is too short to generate one frame')
+    indices = []
+    for index in range(count):
+        position = index % (2 * source_count)
+        indices.append(position if position < source_count else 2 * source_count - 1 - position)
+    return indices
 
 
 def _is_directory_link(path):
@@ -129,6 +141,7 @@ class MuseTalkRuntime:
         self.torch = torch
         self.device = torch.device('cuda:0')
         self.batch_size = settings['batch_size']
+        self.timeline = settings['timeline']
         self.vae, self.unet, self.pe = load_all_model(
             unet_model_path=str(models / 'musetalkV15' / 'unet.pth'),
             unet_config=str(models / 'musetalkV15' / 'musetalk.json'),
@@ -169,6 +182,9 @@ class MuseTalkRuntime:
         import numpy as np
         torch = self.torch
         rate, expected_frames = video_timing(video)
+        audio_duration = probe(audio, 'audio') if getattr(self, 'timeline', 'strict') == 'audio' else None
+        frame_indices = output_frame_indices(expected_frames, rate, audio_duration)
+        output_count = len(frame_indices)
         with tempfile.TemporaryDirectory(prefix='musetalk-', dir=output.parent) as temp:
             temp = Path(temp)
             frames_dir, result_dir = temp / 'frames', temp / 'generated'
@@ -192,13 +208,14 @@ class MuseTalkRuntime:
                     if not (0 <= x1 < x2 <= frame.shape[1] and 0 <= y1 < y2 <= frame.shape[0]):
                         raise ValueError('Invalid face bounding box')
                     boxes.append((x1, y1, x2, y2))
-                chunks = self._audio_features(audio, len(frames), rate)
-                for start in range(0, len(frames), self.batch_size):
-                    end = min(start + self.batch_size, len(frames))
+                chunks = self._audio_features(audio, output_count, rate)
+                for start in range(0, output_count, self.batch_size):
+                    end = min(start + self.batch_size, output_count)
                     latents = []
                     for index in range(start, end):
-                        x1, y1, x2, y2 = boxes[index]
-                        crop = cv2.resize(frames[index][y1:y2, x1:x2], (256, 256),
+                        source_index = frame_indices[index]
+                        x1, y1, x2, y2 = boxes[source_index]
+                        crop = cv2.resize(frames[source_index][y1:y2, x1:x2], (256, 256),
                                           interpolation=cv2.INTER_LANCZOS4)
                         latents.append(self.vae.get_latents_for_unet(crop))
                     prediction = self.unet.model(
@@ -208,12 +225,13 @@ class MuseTalkRuntime:
                     if len(reconstructed) != end - start:
                         raise ValueError('Model output frame count mismatch')
                     for index, face in zip(range(start, end), reconstructed):
-                        x1, y1, x2, y2 = boxes[index]
+                        source_index = frame_indices[index]
+                        x1, y1, x2, y2 = boxes[source_index]
                         face = cv2.resize(face.astype(np.uint8), (x2 - x1, y2 - y1))
-                        combined = self.get_image(frames[index].copy(), face, boxes[index],
+                        combined = self.get_image(frames[source_index].copy(), face, boxes[source_index],
                                                   mode='jaw', fp=self.fp)
                         if not cv2.imwrite(str(result_dir / f'{index:08d}.png'), combined):
                             raise RuntimeError('Could not write generated frame')
             ffmpeg(['-framerate', str(rate), '-start_number', '0', '-i', result_dir / '%08d.png',
-                    '-frames:v', str(len(frames)), '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                    '-frames:v', str(output_count), '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
                     '-crf', '18', output])

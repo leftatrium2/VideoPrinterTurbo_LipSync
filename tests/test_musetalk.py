@@ -34,8 +34,14 @@ def copying_worker(connection, settings):
             else:
                 connection.send(('error', 'Test inference failure'))
                 continue
-        subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', video,
-                        '-map', '0:v:0', '-c:v', 'copy', output], check=True)
+        if settings.get('timeline') == 'audio':
+            from lipsync_service.engine import probe
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-stream_loop', '-1', '-i', video,
+                            '-t', str(probe(Path(audio), 'audio')), '-map', '0:v:0', '-c:v', 'libx264', output],
+                           check=True)
+        else:
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', video,
+                            '-map', '0:v:0', '-c:v', 'copy', output], check=True)
         Path(output).with_name('worker-pid.txt').write_text(str(os.getpid()))
         connection.send(('done', None))
 
@@ -77,6 +83,26 @@ def test_worker_reuses_loaded_process_and_closes(tmp_path, media):
         engine.close()
     assert not engine.ready
     assert engine._process is None
+
+
+def test_audio_timeline_accepts_different_durations_and_validates_against_audio(tmp_path, media):
+    from lipsync_service.engine import probe
+    video, _ = media
+    audio = tmp_path / 'longer.wav'
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                    'sine=frequency=440:duration=2', str(audio)], check=True)
+    engine = MuseTalkEngine(worker_target=copying_worker, runtime_dir=tmp_path / 'worker',
+                            timeout=10, startup_timeout=10, timeline='audio')
+    from lipsync_service.engine import validate_inputs
+    with pytest.raises(ValueError, match='maximum duration difference 150ms'):
+        validate_inputs(video, audio)
+    try:
+        engine.run(video, audio, tmp_path / 'result.mp4')
+        assert abs(probe(tmp_path / 'result.mp4', 'video') - 2) < .05
+        assert abs(probe(tmp_path / 'result.mp4', 'audio') - 2) < .05
+        assert abs(probe(video, 'video') - 1) < .05
+    finally:
+        engine.close()
 
 
 @pytest.mark.parametrize('mode,exception', [('timeout', TimeoutError), ('crash', RuntimeError),
@@ -158,20 +184,32 @@ def test_audio_features_keep_official_context_alignment():
         assert torch.equal(chunks, reference)
 
 
-def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_path):
+@pytest.mark.parametrize('timeline,audio_seconds,expected_count', [('strict', None, 30),
+                                                                 ('audio', 2.1, 62), ('audio', .6, 17)])
+def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_path, timeline,
+                                                                         audio_seconds, expected_count):
     torch = pytest.importorskip('torch')
     cv2 = pytest.importorskip('cv2')
     import numpy as np
     from lipsync_service.musetalk_runtime import MuseTalkRuntime
     video, output = tmp_path / 'source with spaces.mp4', tmp_path / 'output.mp4'
+    audio = tmp_path / 'voice.wav'
+    if audio_seconds is not None:
+        subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                        f'sine=frequency=440:duration={audio_seconds}', str(audio)], check=True)
     subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
                     'testsrc2=size=160x120:rate=30000/1001:duration=1', str(video)], check=True)
     runtime = MuseTalkRuntime.__new__(MuseTalkRuntime)
     runtime.torch, runtime.dtype, runtime.batch_size = torch, torch.float32, 4
+    runtime.timeline = timeline
     runtime.timesteps, runtime.fp = torch.tensor([0]), None
     runtime.no_face = (0., 0., 0., 0.)
-    runtime.get_landmarks = lambda paths, shift: ([(20, 20, 100, 80)] * len(paths),
-                                                 [cv2.imread(path) for path in paths])
+    original_frames, visited_frames = [], []
+    def landmarks(paths, shift):
+        frames = [cv2.imread(path) for path in paths]
+        original_frames.extend(frame.tobytes() for frame in frames)
+        return [(20, 20, 100, 80)] * len(paths), frames
+    runtime.get_landmarks = landmarks
     runtime.vae = SimpleNamespace(get_latents_for_unet=lambda crop: torch.zeros(1, 8, 2, 2),
                                   decode_latents=lambda latent: np.zeros((len(latent), 256, 256, 3), dtype=np.uint8))
     batch_sizes = []
@@ -181,14 +219,20 @@ def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_p
     runtime.unet = SimpleNamespace(model=predict)
     runtime.pe = lambda value: value
     runtime._audio_features = lambda audio, count, fps: torch.zeros(count, 50, 384)
-    runtime.get_image = lambda original, face, box, **kwargs: original
-    runtime.run(video, tmp_path / 'unused.wav', output)
-    assert video_timing(output) == video_timing(video) == (Fraction(30000, 1001), 30)
-    assert batch_sizes == [4] * 7 + [2]
+    def blend(original, face, box, **kwargs):
+        visited_frames.append(original.tobytes())
+        return original
+    runtime.get_image = blend
+    runtime.run(video, audio, output)
+    assert video_timing(video) == (Fraction(30000, 1001), 30)
+    assert video_timing(output) == (Fraction(30000, 1001), expected_count)
+    assert sum(batch_sizes) == expected_count and max(batch_sizes) <= 4
+    cycle = original_frames + original_frames[::-1]
+    assert visited_frames == [cycle[i % len(cycle)] for i in range(expected_count)]
     runtime.get_landmarks = lambda paths, shift: ([runtime.no_face] * len(paths),
                                                  [cv2.imread(path) for path in paths])
     with pytest.raises(ValueError, match='no detectable face'):
-        runtime.run(video, tmp_path / 'unused.wav', tmp_path / 'must-not-exist.mp4')
+        runtime.run(video, audio, tmp_path / 'must-not-exist.mp4')
     assert not (tmp_path / 'must-not-exist.mp4').exists()
 
 

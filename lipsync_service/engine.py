@@ -33,10 +33,16 @@ def ffmpeg(args):
                    capture_output=True, check=True, timeout=1800)
 
 
-def validate_inputs(video: Path, audio: Path) -> float:
+def validate_inputs(video: Path, audio: Path, timeline='strict') -> float:
+    if timeline not in ('strict', 'audio'):
+        raise ValueError('Timeline must be strict or audio')
     duration = probe(video, 'video')
-    if abs(duration - probe(audio, 'audio')) > .15:
-        raise ValueError('Video and audio must share a timeline (maximum duration difference 150ms)')
+    audio_duration = probe(audio, 'audio')
+    if timeline == 'audio':
+        return audio_duration
+    if abs(duration - audio_duration) > .15:
+        raise ValueError(f'Video ({duration:.3f}s) and audio ({audio_duration:.3f}s) must share a timeline '
+                         '(maximum duration difference 150ms)')
     return duration
 
 

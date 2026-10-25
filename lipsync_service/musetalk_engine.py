@@ -70,15 +70,17 @@ def _worker(connection, settings):
 
 class MuseTalkEngine:
     def __init__(self, *, model_dir=None, gpu='0', batch_size=1, use_float16=True,
-                 timeout=3600, startup_timeout=600, runtime_dir=None, worker_target=None):
+                 timeout=3600, startup_timeout=600, runtime_dir=None, worker_target=None, timeline='strict'):
         if batch_size < 1:
             raise ValueError('MuseTalk batch size must be positive')
+        if timeline not in ('strict', 'audio'):
+            raise ValueError('Timeline must be strict or audio')
         self.timeout, self.startup_timeout = timeout, startup_timeout
         self.settings = {
             'source': str(ROOT / 'third_party' / 'MuseTalk'),
             'models': str(Path(model_dir or ROOT / 'models').resolve()),
             'runtime': str(Path(runtime_dir or ROOT / '.runtime' / 'musetalk').resolve()),
-            'gpu': str(gpu), 'batch_size': batch_size, 'float16': use_float16,
+            'gpu': str(gpu), 'batch_size': batch_size, 'float16': use_float16, 'timeline': timeline,
         }
         self._target = worker_target or _worker
         self._process = self._connection = None
@@ -208,7 +210,7 @@ class MuseTalkEngine:
 
     def run(self, video: Path, audio: Path, output: Path):
         video, audio, output = video.resolve(), audio.resolve(), output.resolve()
-        duration = validate_inputs(video, audio)
+        duration = validate_inputs(video, audio, self.settings['timeline'])
         raw = output.with_name('model-output.mp4')
         with self._lock:
             self.start()
