@@ -2,6 +2,7 @@
 import hmac
 import time
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -43,6 +44,10 @@ class FileSpec(BaseModel):
 class UploadSpec(BaseModel):
     video: FileSpec
     audio: FileSpec
+
+
+class SubmitSpec(BaseModel):
+    timeline: Literal['strict', 'audio'] = 'strict'
 
 
 def auth(request: Request, authorization: str | None = Header(default=None)):
@@ -100,8 +105,8 @@ async def patch(uid: str, kind: str, request: Request, upload_offset: int = Head
 
 
 @router.post('/uploads/{uid}/submit')
-def submit(uid: str, request: Request):
-    return result_succ(request.app.state.service.submit(uid))
+def submit(uid: str, request: Request, spec: SubmitSpec | None = None):
+    return result_succ(request.app.state.service.submit(uid, spec.timeline if spec else 'strict'))
 
 
 @router.get('/jobs/{jid}')

@@ -99,3 +99,30 @@ third_party/MuseTalk/musetalk/models/vae.py
 日志尾部输出测试、Job Object 关闭顺序测试通过。全量回归：**53 passed，0 skipped，退出码 0**，耗时 38.78 秒。
 
 上述 PowerShell 检查使用 macOS 上的 PowerShell 7.6.8，Windows API 用例仍使用模拟接口。没有在本机执行 Miniforge Windows 安装器、Windows PowerShell 5.1、原生 Windows CUDA/DLL 加载、目录联接或真实 GPU 推理；这些仍需 Windows 实机验收。
+
+## RemoteLipSync HTTP 模式与恢复集成
+
+本次同步修改客户端与服务端，提交体支持可选 timeline（无请求体默认 strict），任务返回模式及预期时长。
+模式随任务 IPC 传递，交替请求复用同一个常驻模型。客户端预检、检查点身份、服务端确认及下载结果校验都使用同一模式。
+支持旧 strict 检查点迁移，模式变化创建新会话；服务器重启、丢失提交响应、失败任务不自动重做的行为保留。
+
+客户端先查询根路径 `/health`；audio 要求服务端显式广告能力。503 以独立 readiness_timeout 等待，
+受到 job_timeout 总预算限制；模拟 54 秒恢复、永久 503、鉴权拒绝、错误 JSON 和模式/时长不匹配均有回归。
+不支持硬链接时使用 Windows 非替换重命名或 Linux/macOS 原子独占接口；模拟权限、磁盘和竞争错误，
+以及实际 macOS 独占重命名测试，确保既有输出不被覆盖、下载和检查点可继续使用。
+
+完整回归（加入 CLI 子进程用例之前）：**95 passed，0 skipped，退出码 0**，耗时 76.81 秒。
+包含真实本机 Uvicorn/TCP、ASGI、FFmpeg 媒体，以及默认/长短音频模式、混合任务模型进程复用、续传与重启。
+Python 3.10 语法和相关修改的 diff 检查通过。VideoPrinterTurbo 中已有 fal_latentsync.py 的尾部空行不属于本次修改，保持原样。
+新增 CLI 子进程验收另行执行：**2 passed，退出码 0**，耗时 6.15 秒。分别通过真实本机 TCP 运行
+`python -m pipeline.lip_sync.check_remote` 的 strict/audio 模式，验证 Bearer 鉴权、不同输入时长、
+实际下载文件及不保存密钥的报告。两批合计覆盖当前 97 个测试。OpenAPI 的 timeline 枚举及旧无请求体兼容检查通过。
+
+真实服务器地址和本机可读取的人脸素材尚未提供，因此本次新增 HTTP 协议尚未在用户 GPU 服务上验收。
+可在 VideoPrinterTurbo/server 执行 `python -m pipeline.lip_sync.check_remote --help` 查看实机验证入口；
+更新服务代码后需重启 LipSync 服务。API 密钥仅通过环境变量传入，报告不保存密钥。
+实施状态见 [REMOTE_INTEGRATION_TODO.md](REMOTE_INTEGRATION_TODO.md)。
+
+独占文件发布参考：Python 的 [os.rename 平台行为](https://docs.python.org/3.10/library/os.html#os.rename)、
+[Linux renameat2/RENAME_NOREPLACE](https://man7.org/linux/man-pages/man2/rename.2.html) 以及本机 macOS SDK 的
+sys/stdio.h 中 renamex_np/RENAME_EXCL 声明。Windows 文件系统及 GPU 路径仍需原生实机验证。

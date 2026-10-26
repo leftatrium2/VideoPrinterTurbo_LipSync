@@ -74,7 +74,7 @@ curl http://127.0.0.1:8081/
 curl http://127.0.0.1:8081/health
 ```
 
-`GET /` retains `{code:0,msg:"success",data:{}}`. `/health` returns `{"ready":true}` with HTTP 200, or `{"ready":false}` with HTTP 503. Interactive API documentation is at `/docs`; see [API.md](API.md) for transfer semantics.
+`GET /` retains `{code:0,msg:"success",data:{}}`. `/health` returns `ready` and supported `timelines`, with HTTP 200 when ready or HTTP 503 while unavailable. Interactive API documentation is at `/docs`; see [API.md](API.md) for transfer semantics.
 
 For access from another machine:
 
@@ -92,7 +92,7 @@ Timeouts and inference failures recycle the model process and its FFmpeg descend
 
 Normal shutdown asks the idle model worker to exit and waits up to 10 seconds for Python resource cleanup before terminating its process tree. Failure and inference-timeout recovery still use forced termination.
 
-Inputs must share a start time and differ in duration by no more than 150 ms. Videos must have a constant frame rate and detectable faces. Output preserves frame count, order and fractional frame rate; no video looping, speed changes or truncation are used. Missing faces or variable frame rate cause failure. Output is fully decoded, duration-checked and muxed with the uploaded audio. Visual lip-sync quality requires manual review.
+Videos must have a constant frame rate and detectable faces. Default strict tasks require aligned inputs within 150 ms and preserve frame count/order/rate. Explicit audio tasks render to the complete audio duration, repeating source frames forward/reverse or ending output earlier as needed. Both modes retain fractional FPS sampling, full decode, expected duration and uploaded-audio checks. The same loaded worker handles alternating modes. Visual lip-sync quality requires manual review.
 
 Preprocessing still stores decoded images and reads the complete clip into memory; long videos require sufficient RAM and disk. Jobs have isolated temporary directories and TTL cleanup. Metadata/queue are in memory; restart invalidates old IDs and clears abandoned run files.
 
@@ -150,7 +150,7 @@ For original MuseTalk test inputs with different video/audio durations, add `--t
 ```
 
 Audio mode renders to the complete audio duration, quantized to source video frames. Longer audio repeats frames in upstream MuseTalk's forward/reverse cycle; shorter audio generates a shorter result. Inputs are unchanged. Decode, expected output duration and audio-stream checks remain enabled, and the report records the selected timeline.
-The default `--timeline strict` preserves the source timeline and rejects differences over 150 ms before model loading, showing both durations. Audio mode is available for local model verification and direct Python engine calls; the HTTP service and VideoPrinterTurbo client retain their strict timeline contract.
+The default `--timeline strict` preserves the source timeline and rejects differences over 150 ms before model loading, showing both durations. Audio mode is also available through HTTP and RemoteLipSync. Update client and server together; removing client validation alone does not enable it.
 
 ## VideoPrinterTurbo client
 
@@ -166,6 +166,8 @@ service = RemoteLipSync(
     request_timeout=60,
     poll_interval=2,
     job_timeout=7200,
+    readiness_timeout=600,
+    timeline="strict",  # Explicitly choose "audio" for different durations
     chunk_size=8 * 1024 * 1024,
     retries=3,
     retry_delay=1,
@@ -173,7 +175,7 @@ service = RemoteLipSync(
 result = service.lip_sync("speaker.mp4", "final_voice.wav", "speaker_synced.mp4")
 ```
 
-Transfers support resume, idempotent submission and SHA-256 validation. Checkpoints never store keys. A failed job requires removing the checkpoint or choosing a new output to explicitly retry. This change does not modify the client repository, PipelineManager, database or frontend.
+Transfers support resume, idempotent submission and SHA-256 validation. Checkpoints never store keys. A failed job requires removing the checkpoint or choosing a new output to explicitly retry. This change updates the remote client and HTTP contract; PipelineManager, database and frontend remain outside its scope.
 
 ## Development verification
 
@@ -188,3 +190,25 @@ UV_CACHE_DIR="$PWD/.cache/uv" PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.runtime/tm
 Fake copying engines only verify protocol and lifecycle behavior, not lip-sync quality. Sandboxes that disallow local ports skip TCP cases.
 
 Source attribution: [third_party/README.md](third_party/README.md). Historical standalone installation instructions remain in `doc/MuseTalk/INSTALL.md`; new deployments use this README.
+
+
+## Remote budgets and acceptance
+
+RemoteLipSync supports explicit strict/audio timelines and a 600-second readiness timeout. Audio jobs require advertised server capability and matching job mode/duration. Missing submit bodies remain strict; same-mode resubmission is idempotent, changing mode on a submitted upload returns 409. Checkpoints include mode identity; only strict can migrate legacy mode-less checkpoints.
+
+The 60-second request timeout limits individual HTTP requests. The readiness timeout limits model startup/recovery waiting. The 7200-second job budget starts after input preflight/hashing and covers readiness, upload, queue/model waiting, download and verification. Recovery from 503 uses readiness and job deadlines rather than only three short retries. Auth/input errors fail immediately. Local timeout preserves checkpoints without cancelling remote work.
+
+On the measured RTX 3080, 12.564 seconds of media took about 279–316 seconds to process. Illustrative budgets: up to one minute, server inference timeout 3600 / client job timeout 7200; three to five minutes, 14400 / 21600. Keep readiness at 600 and account for preceding queued work separately. Measure on the target machine; these values are not throughput guarantees. Restart the server after changing its inference timeout.
+
+Result publication uses hard links where supported, otherwise a platform exclusive atomic rename; permission, disk-space and existing-file errors are preserved, and partial downloads/checkpoints remain resumable.
+
+From sibling VideoPrinterTurbo's `server/`, with FFmpeg/ffprobe and its Python dependencies available:
+
+```bash
+python -m pipeline.lip_sync.check_remote \
+  --base-url http://192.168.1.100:8081 \
+  --video /absolute/path/speaker.mp4 --audio /absolute/path/voice.wav \
+  --output /absolute/path/new_synced.mp4 --timeline audio
+```
+
+Use the actual LAN IP. Credentials are read from LIPSYNC_API_KEY; the generated `.remote-verification.json` contains no key and records mode, job ID, elapsed time, durations and SHA-256. Use aligned inputs for strict acceptance and play the output to inspect lip quality.

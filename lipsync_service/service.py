@@ -11,7 +11,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from .engine import digest
+from .engine import digest, validate_inputs
 from .storage import StorageLock
 
 logger = logging.getLogger(__name__)
@@ -121,14 +121,21 @@ class Service:
             self.get(job['upload_id'])
             return dict(job)
 
-    def submit(self, uid):
+    def submit(self, uid, timeline='strict'):
+        if timeline not in ('strict', 'audio'):
+            raise HTTPException(422, 'Timeline must be strict or audio')
         with self.lock:
             upload = self.get(uid)
             if not upload.lock.acquire(blocking=False):
                 raise HTTPException(409, 'Upload operation in progress')
         try:
             if upload.job_id:
-                return self.job(upload.job_id)
+                job = self.job(upload.job_id)
+                if job['timeline'] != timeline:
+                    raise HTTPException(409, 'Upload was already submitted with a different timeline')
+                return job
+            if timeline == 'audio' and not hasattr(self.engine, 'run_timeline'):
+                raise HTTPException(422, 'This engine does not support the audio timeline')
             if not self.engine.ready:
                 raise HTTPException(503, 'LipSync engine is not ready')
             # Hash outside the global lock: multi-GiB inputs must not block other sessions.
@@ -139,7 +146,8 @@ class Service:
                     raise HTTPException(422, 'Input SHA-256 mismatch; create a new upload')
             with self.lock:
                 jid = uuid.uuid4().hex
-                job = {'job_id': jid, 'upload_id': uid, 'status': 'queued', 'error': None, 'result': None}
+                job = {'job_id': jid, 'upload_id': uid, 'status': 'queued', 'error': None, 'result': None,
+                       'timeline': timeline, 'expected_duration': None}
                 self.jobs[jid] = job
                 upload.job_id = jid
                 self.queue.put(jid)
@@ -183,7 +191,14 @@ class Service:
                 job['status'] = 'running'
             output = upload.directory / 'result.mp4'
             try:
-                self.engine.run(upload.files['video']['path'], upload.files['audio']['path'], output)
+                video, audio = upload.files['video']['path'], upload.files['audio']['path']
+                expected = validate_inputs(video, audio, job['timeline'])
+                with self.lock:
+                    job['expected_duration'] = expected
+                if hasattr(self.engine, 'run_timeline'):
+                    self.engine.run_timeline(video, audio, output, timeline=job['timeline'])
+                else:
+                    self.engine.run(video, audio, output)
                 if not output.is_file() or not output.stat().st_size:
                     raise ValueError('Engine returned an empty output')
                 result = {'size': output.stat().st_size, 'sha256': digest(output)}

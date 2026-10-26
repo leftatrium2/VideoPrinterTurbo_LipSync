@@ -6,16 +6,26 @@ Success JSON: `{code: 0, msg: "success", data: ...}`. Errors use HTTP status and
 
 | Method | Path | Body / result |
 | --- | --- | --- |
-| GET | /health | No auth; `{ready: true}` (200) or `{ready: false}` (503) |
+| GET | /health | No auth; `{ready, timelines: ["strict", "audio"]}`; 200 if ready, otherwise 503; strict-only engines advertise only strict |
 | POST | /v1/uploads | `{video: {name,size,sha256}, audio: {name,size,sha256}}` → session |
 | GET | /v1/uploads/{id} | session, including authoritative offsets and optional job_id |
 | PATCH | /v1/uploads/{id}/{video\|audio} | raw octets, `Upload-Offset` header → session |
-| POST | /v1/uploads/{id}/submit | verifies both files, idempotently enqueues → job |
+| POST | /v1/uploads/{id}/submit | optional `{timeline: "strict"|"audio"}`; verifies files, idempotently enqueues → job |
 | GET | /v1/jobs/{id} | job status `queued/running/succeeded/failed`, error, result |
 | GET | /v1/jobs/{id}/result | MP4, single HTTP byte Range/If-Range supported; 409 until succeeded |
 
 Session: `{upload_id, files: {video: {size,sha256,offset}, audio: ...}, job_id}`.
-Job: `{job_id, upload_id, status, error, result: null|{size,sha256}}`.
+Job: `{job_id, upload_id, status, error, timeline, expected_duration, result: null|{size,sha256}}`.
+`timeline` defaults to `strict` for an absent body. Retrying submit with the same mode
+returns the original job, including failed jobs; a different mode returns 409.
+`expected_duration` is null while queued/before input validation, otherwise seconds.
+Strict mode preserves source video duration; audio mode renders to full audio duration,
+quantized to source frames, using MuseTalk's forward/reverse cycle when needed.
+Duration checks allow 150 ms; low-FPS inputs that cannot represent the requested audio
+duration within that tolerance fail explicitly. Frame counts use rational FPS arithmetic.
+Mode is immutable per job. Engines without audio support reject audio submission with 422.
+The health response additionally advertises `timelines` (supported modes), including
+while recovering. Clients must check audio support before submitting audio-mode work.
 `name` supplies only a validated file extension; server chooses all paths and IDs.
 PATCH is sequential per file; wrong offset returns 409 without modifying it. Chunk limit
 is 8 MiB by default. Incomplete transfers return 409 on submit; checksum mismatch 422.
@@ -32,13 +42,21 @@ reports engine readiness; `GET /` retains its original success response. During 
 recovery health and new submissions may return 503; queued jobs remain queued until
 the serial worker reaches them. A failed job is never retried automatically. A supervisor
 also reloads workers that exit while idle, retrying failed recovery every 30 seconds.
-MuseTalk accepts constant frame rate video and aligned audio (duration difference at most
-150 ms). It preserves source frame count/order and fractional frame rate, without cycling
-or retiming video. Variable frame rate and frames without a detected face fail the job.
+MuseTalk requires constant frame rate video. Default strict mode requires aligned audio
+(difference at most 150 ms) and preserves source frame count/order and fractional rate.
+Explicit audio mode accepts different durations and uses the audio timeline. Both modes
+reject frames without a detected face. Mode switches reuse the loaded model.
 Model quality still requires manual inspection. `LIPSYNC_ENGINE=command` retains the
 legacy adapter contract for custom deployments and protocol tests.
 
 Client checkpoint stores endpoint, input fingerprints, upload ID and job ID, never keys.
+It includes timeline identity. Legacy checkpoints with no mode migrate only for strict;
+changing mode starts a new session. Audio clients require explicit health capability and
+matching job mode/duration. New strict clients accept legacy strict job metadata.
 404 starts a fresh upload. Local timeout preserves checkpoint; remote work may continue.
 Success removes the checkpoint and atomically publishes a verified `.part` MP4 without
 replacing existing output. Pipeline integration and frontend changes are out of scope.
+Client readiness waiting defaults to 600 seconds, bounded by the 7200-second job budget.
+The budget starts after input preflight/hashing and covers transfers, queue/model waiting
+and result validation. API 503 recovery queries health with a bounded deadline; other
+retryable network errors retain the configured retry count. Auth/input errors fail fast.

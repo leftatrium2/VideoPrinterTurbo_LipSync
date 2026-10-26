@@ -15,4 +15,5 @@ async def root():
 @router.get('/health')
 async def health(request: Request):
     ready = bool(request.app.state.engine.ready)
-    return JSONResponse({'ready': ready}, status_code=200 if ready else 503)
+    timelines = ['strict', 'audio'] if hasattr(request.app.state.engine, 'run_timeline') else ['strict']
+    return JSONResponse({'ready': ready, 'timelines': timelines}, status_code=200 if ready else 503)

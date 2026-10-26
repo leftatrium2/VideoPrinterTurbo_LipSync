@@ -44,12 +44,13 @@ def _worker(connection, settings):
                 request = connection.recv()
                 if request is None:
                     break
-                video, audio, output = map(Path, request)
+                video, audio, output = map(Path, request[:3])
+                timeline = request[3]
                 with output.with_name('inference.log').open('a', buffering=1) as task_log:
                     os.dup2(task_log.fileno(), 1)
                     os.dup2(task_log.fileno(), 2)
                     try:
-                        runtime.run(video, audio, output)
+                        runtime.run(video, audio, output, timeline=timeline)
                         connection.send(('done', None))
                     except Exception:
                         logger.exception('MuseTalk inference failed')
@@ -223,13 +224,16 @@ class MuseTalkEngine:
             self._watcher.join(timeout=10)
 
     def run(self, video: Path, audio: Path, output: Path):
+        return self.run_timeline(video, audio, output, timeline=self.settings['timeline'])
+
+    def run_timeline(self, video: Path, audio: Path, output: Path, *, timeline='strict'):
         video, audio, output = video.resolve(), audio.resolve(), output.resolve()
-        duration = validate_inputs(video, audio, self.settings['timeline'])
+        duration = validate_inputs(video, audio, timeline)
         raw = output.with_name('model-output.mp4')
         with self._lock:
             self.start()
             try:
-                self._connection.send(tuple(map(str, (video, audio, raw))))
+                self._connection.send((*map(str, (video, audio, raw)), timeline))
                 status, detail = self._receive(self.timeout)
                 if status != 'done':
                     raise RuntimeError(detail)

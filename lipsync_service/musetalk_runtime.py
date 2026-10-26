@@ -45,9 +45,12 @@ def audio_window_indices(frame_count, fps):
 
 def output_frame_indices(source_count, fps, audio_duration=None):
     """None keeps the source timeline; audio mode uses upstream's ping-pong cycle."""
-    count = source_count if audio_duration is None else math.floor(audio_duration * fps)
+    rate = Fraction(str(fps))
+    count = source_count if audio_duration is None else math.floor(Fraction(str(audio_duration)) * rate)
     if source_count < 1 or count < 1:
         raise ValueError('Video or audio is too short to generate one frame')
+    if audio_duration is not None and abs(float(count / rate) - audio_duration) > .15:
+        raise ValueError('Audio duration cannot be represented within 150ms at this video frame rate')
     indices = []
     for index in range(count):
         position = index % (2 * source_count)
@@ -177,12 +180,15 @@ class MuseTalkRuntime:
         chunks = torch.cat([padded[:, i:i + window] for i in indices], dim=0)
         return chunks.reshape(frame_count, -1, chunks.shape[-1])
 
-    def run(self, video, audio, output):
+    def run(self, video, audio, output, *, timeline=None):
         import cv2
         import numpy as np
         torch = self.torch
         rate, expected_frames = video_timing(video)
-        audio_duration = probe(audio, 'audio') if getattr(self, 'timeline', 'strict') == 'audio' else None
+        selected = getattr(self, 'timeline', 'strict') if timeline is None else timeline
+        if selected not in ('strict', 'audio'):
+            raise ValueError('Timeline must be strict or audio')
+        audio_duration = probe(audio, 'audio') if selected == 'audio' else None
         frame_indices = output_frame_indices(expected_frames, rate, audio_duration)
         output_count = len(frame_indices)
         with tempfile.TemporaryDirectory(prefix='musetalk-', dir=output.parent) as temp:

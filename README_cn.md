@@ -82,7 +82,7 @@ curl http://127.0.0.1:8081/
 curl http://127.0.0.1:8081/health
 ```
 
-`GET /` 保持原返回 `{"code":0,"msg":"success","data":{}}`；`/health` 就绪时返回 `{"ready":true}` 和 HTTP 200，恢复中或不可用时返回 `{"ready":false}` 和 HTTP 503。接口文档位于 `/docs`，传输契约见 [API.md](API.md)。
+`GET /` 保持原返回 `{"code":0,"msg":"success","data":{}}`；`/health` 返回 `ready` 和支持的 `timelines`；就绪时 HTTP 200，恢复中或不可用时 HTTP 503。接口文档位于 `/docs`，传输契约见 [API.md](API.md)。
 
 跨机器调用：
 
@@ -100,7 +100,7 @@ bash start.sh
 
 正常关闭时先通知空闲推理进程退出，最多等待 10 秒，让 Python 清理信号量等资源；超过等待时间才强制回收进程树。异常和推理超时仍使用强制回收。
 
-输入视频须为恒定帧率、有可检测人脸的视频；音频须与视频共享起点，时长差不超过 150ms。输出保持原视频帧数、顺序和帧率，不循环、变速或截断画面。29.97 等小数帧率保留其音频采样时间；变帧率视频或检测不到人脸的帧会导致任务失败。结果经过完整解码、时长校验，并使用上传音频封装音轨。真实口型效果需人工播放检查。
+输入视频须为恒定帧率、有可检测人脸的视频。HTTP 提交任务可选择 `timeline`：默认 `strict` 要求共享起点、时长差不超过 150ms，保持原帧数、顺序和帧率；显式 `audio` 按完整音频长度生成画面，允许正放/倒放循环或提前结束输出。两种模式均保留小数帧率采样、完整解码、预期时长和上传音轨校验；变帧率或缺失人脸会失败，口型效果仍需人工检查。同一常驻模型可以交替处理两种模式。
 
 当前实现仍会将视频帧写入任务临时目录，并在预处理中读取整段帧；长视频需要充足内存和磁盘。任务目录隔离，结束后按 TTL 清理。重启会清除旧任务状态和临时运行数据，客户端需要重新上传和提交。
 
@@ -158,7 +158,7 @@ bash scripts/capture_baseline.sh "$HOME/apps/MuseTalk"
 ```
 
 该模式按完整音频长度生成视频（取整到视频帧），音频较长时使用原版 MuseTalk 的“正放、倒放”循环帧顺序，音频较短时只生成对应时长的视频。输入文件不变，完整解码、输出时长和音轨校验仍保留。`.verification.json` 记录时间线模式和预期时长。
-默认 `--timeline strict` 仍保留源视频时间线并要求时长差不超过 150ms；错误会在加载模型前提示双方时长。此可选模式用于本地模型验证和直接 Python 引擎调用；当前 HTTP 服务及 VideoPrinterTurbo 客户端继续沿用严格时间线约定。
+默认 `--timeline strict` 仍保留源视频时间线并要求时长差不超过 150ms；错误会在加载模型前提示双方时长。HTTP 服务和 `RemoteLipSync` 也支持显式 audio 模式；需要同步更新客户端与服务端，不能只取消客户端时长校验。
 
 ## VideoPrinterTurbo 调用
 
@@ -174,6 +174,8 @@ service = RemoteLipSync(
     request_timeout=60,
     poll_interval=2,
     job_timeout=7200,
+    readiness_timeout=600,
+    timeline="strict",  # 不等长素材显式改为 "audio"
     chunk_size=8 * 1024 * 1024,
     retries=3,
     retry_delay=1,
@@ -181,7 +183,7 @@ service = RemoteLipSync(
 result = service.lip_sync("speaker.mp4", "final_voice.wav", "speaker_synced.mp4")
 ```
 
-支持上传/下载续传、提交幂等和 SHA-256 校验；检查点不保存密钥。失败任务不会自动重做；主动重试需移除客户端检查点或换新输出路径。本次未修改客户端项目、PipelineManager、数据库或前台。
+支持上传/下载续传、提交幂等和 SHA-256 校验；检查点不保存密钥。失败任务不会自动重做；主动重试需移除客户端检查点或换新输出路径。本次同步更新了口型客户端和 HTTP 协议，未改 PipelineManager、数据库或前台。
 
 ## 本地测试与目录
 
@@ -202,3 +204,31 @@ UV_CACHE_DIR="$PWD/.cache/uv" PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/.runtime/tm
 - `deployment/`：推理依赖与权重清单。
 - `scripts/`：环境检查、成功环境记录和真实 GPU 验证。
 - `doc/MuseTalk/INSTALL_cn.md`：历史独立安装步骤，保留供基准对照；新用户使用本文入口。
+
+
+## 远程调用与超时预算
+
+客户端新增 `timeline="strict"|"audio"`、`readiness_timeout=600`。`/health` 必须声明 audio 能力才提交 audio 任务，返回任务还需确认模式和预期时长。提交时省略请求体仍为 strict，同模式重提返回原任务，换模式重提同一上传返回 409。检查点记录模式，切换模式会新建会话；旧检查点只在 strict 下迁移。
+
+`request_timeout=60` 限制单次 HTTP 请求；`readiness_timeout` 限制一次模型就绪/恢复等待；`job_timeout=7200` 从输入预检和哈希完成后开始，涵盖就绪等待、上传、排队、推理等待、下载和结果验证。503 恢复等待不再仅重试 6 秒，但始终受这两个时间预算限制。401/403/422 等明确错误不会反复等待。
+
+根据当前 12.564 秒素材实测约 279–316 秒推理，以下仅为配置示例，不能替代目标机器测量：
+
+| 场景 | 服务端 LIPSYNC_INFERENCE_TIMEOUT | 客户端 job_timeout | readiness_timeout |
+| --- | --- | --- | --- |
+| 一分钟以内、少量排队 | 3600 | 7200 | 600 |
+| 三至五分钟素材 | 14400 | 21600 | 600 |
+| 多任务排队 | 按单任务耗时设定 | 额外包含前面任务的排队耗时 | 600 |
+
+修改服务端推理超时后需重启服务。客户端超时不取消远程任务，使用相同输入、地址、模式和输出路径再次调用可继续原任务；失败任务不自动重做。Windows 不支持硬链接的文件系统使用独占重命名发布，权限不足/磁盘满仍报错并保留已下载文件和检查点。
+
+真实 HTTP/GPU 验收可在相邻 `VideoPrinterTurbo/server/` 的 Python 环境运行（本机须有 FFmpeg/ffprobe）：
+
+```bash
+python -m pipeline.lip_sync.check_remote \
+  --base-url http://192.168.1.100:8081 \
+  --video /absolute/path/speaker.mp4 --audio /absolute/path/voice.wav \
+  --output /absolute/path/new_synced.mp4 --timeline audio
+```
+
+服务地址使用实际局域网 IP。API 密钥通过 `LIPSYNC_API_KEY` 环境变量提供；工具输出不含密钥的 `.remote-verification.json`，记录任务 ID、模式、耗时、音视频时长和哈希。strict 验收使用已对齐素材，仍需播放输出检查口型与画面。

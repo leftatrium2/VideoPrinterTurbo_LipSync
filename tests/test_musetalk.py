@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from app import create_app
 from lipsync_service import model_assets
 from lipsync_service.musetalk_engine import MuseTalkEngine
-from lipsync_service.musetalk_runtime import audio_window_indices, prepare_workspace, video_timing
+from lipsync_service.musetalk_runtime import audio_window_indices, prepare_workspace, video_timing, output_frame_indices
 
 
 def copying_worker(connection, settings):
@@ -27,7 +27,8 @@ def copying_worker(connection, settings):
         if request is None:
             connection.close()
             return
-        video, audio, output = request
+        video, audio, output = request[:3]
+        timeline = request[3]
         marker = Path(settings['runtime']) / 'failed-once'
         if settings['gpu'] in ('timeout', 'crash', 'error') and not marker.exists():
             marker.touch()
@@ -38,7 +39,7 @@ def copying_worker(connection, settings):
             else:
                 connection.send(('error', 'Test inference failure'))
                 continue
-        if settings.get('timeline') == 'audio':
+        if timeline == 'audio':
             from lipsync_service.engine import probe
             subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-stream_loop', '-1', '-i', video,
                             '-t', str(probe(Path(audio), 'audio')), '-map', '0:v:0', '-c:v', 'libx264', output],
@@ -109,6 +110,27 @@ def test_audio_timeline_accepts_different_durations_and_validates_against_audio(
         engine.close()
 
 
+def test_alternating_timeline_tasks_reuse_one_loaded_worker(tmp_path, media):
+    from lipsync_service.engine import probe
+    audio = tmp_path / 'longer.wav'
+    subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                    'sine=duration=2', str(audio)], check=True)
+    engine = MuseTalkEngine(worker_target=copying_worker, runtime_dir=tmp_path / 'worker', startup_timeout=10)
+    try:
+        engine.start()
+        pid = engine._process.pid
+        for index, timeline in enumerate(('audio', 'strict', 'audio')):
+            directory = tmp_path / str(index)
+            directory.mkdir()
+            output = directory / 'result.mp4'
+            engine.run_timeline(media[0], audio if timeline == 'audio' else media[1], output, timeline=timeline)
+            assert engine._process.pid == pid
+            assert probe(output, 'video') == pytest.approx(2 if timeline == 'audio' else 1, abs=.05)
+        assert engine.settings['timeline'] == 'strict'
+    finally:
+        engine.close()
+
+
 @pytest.mark.parametrize('mode,exception', [('timeout', TimeoutError), ('crash', RuntimeError),
                                           ('error', RuntimeError)])
 def test_failed_worker_is_replaced_and_next_job_runs(tmp_path, media, mode, exception):
@@ -140,7 +162,7 @@ def test_startup_failure_releases_storage_lock(tmp_path):
         assert client.get('/').status_code == 200
         response = client.get('/health')
         assert response.status_code == 503
-        assert response.json() == {'ready': False}
+        assert response.json() == {'ready': False, 'timelines': ['strict']}
 
 
 def test_idle_worker_crash_recovers_without_a_new_job(tmp_path):
@@ -157,7 +179,7 @@ def test_idle_worker_crash_recovers_without_a_new_job(tmp_path):
             time.sleep(.05)
         assert engine.ready and engine._process.pid != original_pid
         with TestClient(create_app(engine=engine, storage=tmp_path / 'storage')) as client:
-            assert client.get('/health').json() == {'ready': True}
+            assert client.get('/health').json() == {'ready': True, 'timelines': ['strict', 'audio']}
     finally:
         engine.close()
 
@@ -169,6 +191,16 @@ def test_fractional_fps_does_not_accumulate_audio_drift():
     assert indices[0] == 0
     assert indices[-1] == int(17999 * 50 / fps)
     assert abs(indices[-1] / 50 - 17999 / float(fps)) < .02
+
+
+def test_exact_fractional_audio_duration_does_not_drop_a_frame():
+    indices = output_frame_indices(30, Fraction(30000, 1001), 2.002)
+    assert indices == list(range(30)) + list(range(29, -1, -1))
+
+
+def test_low_fps_quantization_failure_is_explicit():
+    with pytest.raises(ValueError, match='cannot be represented within 150ms'):
+        output_frame_indices(3, 1, 1.9)
 
 
 def test_audio_features_keep_official_context_alignment():
@@ -205,7 +237,7 @@ def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_p
                     'testsrc2=size=160x120:rate=30000/1001:duration=1', str(video)], check=True)
     runtime = MuseTalkRuntime.__new__(MuseTalkRuntime)
     runtime.torch, runtime.dtype, runtime.batch_size = torch, torch.float32, 4
-    runtime.timeline = timeline
+    runtime.timeline = 'strict'
     runtime.timesteps, runtime.fp = torch.tensor([0]), None
     runtime.no_face = (0., 0., 0., 0.)
     original_frames, visited_frames = [], []
@@ -227,7 +259,7 @@ def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_p
         visited_frames.append(original.tobytes())
         return original
     runtime.get_image = blend
-    runtime.run(video, audio, output)
+    runtime.run(video, audio, output, timeline=timeline)
     assert video_timing(video) == (Fraction(30000, 1001), 30)
     assert video_timing(output) == (Fraction(30000, 1001), expected_count)
     assert sum(batch_sizes) == expected_count and max(batch_sizes) <= 4
@@ -236,7 +268,7 @@ def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_p
     runtime.get_landmarks = lambda paths, shift: ([runtime.no_face] * len(paths),
                                                  [cv2.imread(path) for path in paths])
     with pytest.raises(ValueError, match='no detectable face'):
-        runtime.run(video, audio, tmp_path / 'must-not-exist.mp4')
+        runtime.run(video, audio, tmp_path / 'must-not-exist.mp4', timeline=timeline)
     assert not (tmp_path / 'must-not-exist.mp4').exists()
 
 
