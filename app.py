@@ -22,6 +22,13 @@ def positive_env(name, default, cast=float):
     return value
 
 
+def inference_timeout_env():
+    value = float(os.environ.get('LIPSYNC_INFERENCE_TIMEOUT', '0'))
+    if not math.isfinite(value) or value < 0:
+        raise ValueError('LIPSYNC_INFERENCE_TIMEOUT must be finite and nonnegative')
+    return value
+
+
 def create_app(*, engine=None, storage=None, api_key=None, ttl=None, capacity=None,
                max_file=None, chunk_size=None):
     key = api_key if api_key is not None else os.environ.get('LIPSYNC_API_KEY', '')
@@ -47,8 +54,11 @@ def create_app(*, engine=None, storage=None, api_key=None, ttl=None, capacity=No
             gpu=os.environ.get('LIPSYNC_GPU', '0'),
             batch_size=positive_env('LIPSYNC_BATCH_SIZE', 1, int),
             use_float16=precision == '1',
-            timeout=positive_env('LIPSYNC_INFERENCE_TIMEOUT', 3600),
-            startup_timeout=positive_env('LIPSYNC_STARTUP_TIMEOUT', 600))
+            timeout=inference_timeout_env(),
+            startup_timeout=positive_env('LIPSYNC_STARTUP_TIMEOUT', 600),
+            idle_timeout=positive_env('LIPSYNC_IDLE_TIMEOUT', 600),
+            media_idle_timeout=positive_env('LIPSYNC_MEDIA_IDLE_TIMEOUT', 120),
+            frame_memory_mb=positive_env('LIPSYNC_FRAME_MEMORY_MB', 256, int))
 
     @asynccontextmanager
     async def lifespan(app):

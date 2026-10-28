@@ -94,7 +94,11 @@ Normal shutdown asks the idle model worker to exit and waits up to 10 seconds fo
 
 Videos must have a constant frame rate and detectable faces. Default strict tasks require aligned inputs within 150 ms and preserve frame count/order/rate. Explicit audio tasks render to the complete audio duration, repeating source frames forward/reverse or ending output earlier as needed. Both modes retain fractional FPS sampling, full decode, expected duration and uploaded-audio checks. The same loaded worker handles alternating modes. Visual lip-sync quality requires manual review.
 
-Preprocessing still stores decoded images and reads the complete clip into memory; long videos require sufficient RAM and disk. Jobs have isolated temporary directories and TTL cleanup. Metadata/queue are in memory; restart invalidates old IDs and clears abandoned run files.
+Inference preserves the input display resolution. Frames are decoded and detected in bounded blocks (1–32 frames, sized from a pixel memory budget), temporary PNGs are deleted after each block, and a single encoder writes the output continuously. Forward blocks reuse the decoder; reverse cycles seek by block. Missing-face frames pass through unchanged. Output uses H.264 CRF 18; resolution preservation is not lossless encoding, and the existing BGR24 pipeline does not preserve HDR/high bit depth.
+
+Whisper features keep the original 30-second boundaries, cache at most two segments on CPU, and transfer only the current inference batch to GPU. Global audio indices never restart at video block boundaries. Disk usage includes the input, output and temporary 16 kHz mono float32 PCM (about 220 MiB/hour). The frame budget is not a hard RSS cap: model/decoder/encoder/single-frame workspaces are additional. Frame-cache memory no longer grows with clip duration.
+
+Timestamp validation streams frame records with an inactivity deadline instead of a fixed 120-second total deadline. The MuseTalk worker defaults to no total inference limit, with an independent progress deadline. Jobs use isolated temporary directories and TTL cleanup. Restart invalidates old IDs and clears abandoned files. Client job timeouts remain independent and must cover long processing/queue times.
 
 ## Configuration
 
@@ -107,7 +111,10 @@ Preprocessing still stores decoded images and reads the complete clip into memor
 | `LIPSYNC_FLOAT16` | `1` | 1 for FP16, 0 for FP32 |
 | `LIPSYNC_MODEL_DIR` | project/models | Model root; prefer an absolute path |
 | `LIPSYNC_STARTUP_TIMEOUT` | `600` | Model initialization timeout, seconds |
-| `LIPSYNC_INFERENCE_TIMEOUT` | `3600` | Model inference timeout; media checks have separate limits |
+| `LIPSYNC_INFERENCE_TIMEOUT` | `0` | MuseTalk worker total limit in seconds; 0 disables it. Command backend defaults to 3600 and requires a positive value |
+| `LIPSYNC_IDLE_TIMEOUT` | `600` | Worker inactivity deadline, reporting the last stage |
+| `LIPSYNC_MEDIA_IDLE_TIMEOUT` | `120` | Media output/frame I/O/finalization inactivity deadline |
+| `LIPSYNC_FRAME_MEMORY_MB` | `256` | Pixel memory budget in MiB, reserving three pixel buffers per frame |
 | `LIPSYNC_API_KEY` | empty | Bearer key for all `/v1` routes |
 | `LIPSYNC_STORAGE` | project/storage | Launcher temporary storage root |
 | `LIPSYNC_TTL` | `86400` | Idle lifetime of unsubmitted/finished sessions, seconds |

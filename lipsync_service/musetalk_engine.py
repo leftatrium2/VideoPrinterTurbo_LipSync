@@ -1,5 +1,6 @@
 """Persistent Python worker; CUDA state never enters the HTTP process."""
 import logging
+import math
 import multiprocessing
 import os
 import signal
@@ -9,7 +10,7 @@ import time
 from pathlib import Path
 
 from .engine import finalize_output, validate_inputs
-from .errors import InferenceError, inference_detail
+from .errors import InferenceError, InferenceTimeout, inference_detail
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,6 +41,7 @@ def _worker(connection, settings):
                 raise RuntimeError('Invalid MuseTalk initialization handshake')
             from .musetalk_runtime import MuseTalkRuntime
             runtime = MuseTalkRuntime(settings)
+            runtime.progress = lambda stage: connection.send(('progress', stage))
             connection.send(('ready', None))
             while True:
                 request = connection.recv()
@@ -74,17 +76,25 @@ def _worker(connection, settings):
 
 class MuseTalkEngine:
     def __init__(self, *, model_dir=None, gpu='0', batch_size=1, use_float16=True,
-                 timeout=3600, startup_timeout=600, runtime_dir=None, worker_target=None, timeline='strict'):
+                 timeout=0, startup_timeout=600, runtime_dir=None, worker_target=None, timeline='strict',
+                 idle_timeout=600, media_idle_timeout=120, frame_memory_mb=256):
         if batch_size < 1:
             raise ValueError('MuseTalk batch size must be positive')
         if timeline not in ('strict', 'audio'):
             raise ValueError('Timeline must be strict or audio')
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError('Inference timeout must be finite and nonnegative')
+        if any(not math.isfinite(value) or value <= 0 for value in
+               (startup_timeout, idle_timeout, media_idle_timeout, frame_memory_mb)):
+            raise ValueError('Startup/idle timeouts and frame memory budget must be finite and positive')
         self.timeout, self.startup_timeout = timeout, startup_timeout
+        self.idle_timeout = idle_timeout
         self.settings = {
             'source': str(ROOT / 'third_party' / 'MuseTalk'),
             'models': str(Path(model_dir or ROOT / 'models').resolve()),
             'runtime': str(Path(runtime_dir or ROOT / '.runtime' / 'musetalk').resolve()),
             'gpu': str(gpu), 'batch_size': batch_size, 'float16': use_float16, 'timeline': timeline,
+            'media_idle_timeout': media_idle_timeout, 'frame_memory_mb': frame_memory_mb,
         }
         self._target = worker_target or _worker
         self._process = self._connection = None
@@ -103,17 +113,26 @@ class MuseTalkEngine:
         except ValueError:  # A concurrent recovery has just closed this process.
             return False
 
-    def _receive(self, timeout):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+    def _receive(self, timeout, *, idle_timeout=None):
+        deadline = time.monotonic() + timeout if timeout is not None else math.inf
+        idle_deadline = time.monotonic() + idle_timeout if idle_timeout is not None else math.inf
+        stage = 'waiting for worker'
+        while time.monotonic() < min(deadline, idle_deadline):
             if self._connection.poll(min(.1, max(0, deadline - time.monotonic()))):
                 try:
-                    return self._connection.recv()
+                    status, detail = self._connection.recv()
+                    if status == 'progress':
+                        stage = str(detail)[:500]
+                        if idle_timeout is not None:
+                            idle_deadline = time.monotonic() + idle_timeout
+                        continue
+                    return status, detail
                 except (EOFError, OSError) as exc:
                     raise RuntimeError('MuseTalk worker exited unexpectedly') from exc
             if not self._process.is_alive():
                 raise RuntimeError('MuseTalk worker exited unexpectedly')
-        raise TimeoutError('MuseTalk worker timed out')
+        reason = 'total inference time limit reached' if time.monotonic() >= deadline else 'no progress'
+        raise InferenceTimeout(f'MuseTalk worker timed out ({reason}); last stage: {stage}')
 
     def start(self):
         with self._lock:
@@ -236,10 +255,11 @@ class MuseTalkEngine:
             self.start()
             try:
                 self._connection.send((*map(str, (video, audio, raw)), timeline))
-                status, detail = self._receive(self.timeout)
+                status, detail = self._receive(self.timeout or None, idle_timeout=self.idle_timeout)
                 if status != 'done':
                     raise InferenceError(detail)
-                finalize_output(raw, audio, output, duration)
+                finalize_output(raw, audio, output, duration,
+                                media_idle_timeout=self.settings['media_idle_timeout'])
             except Exception:
                 self._stop()
                 raw.unlink(missing_ok=True)

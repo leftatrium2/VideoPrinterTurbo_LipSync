@@ -5,8 +5,9 @@ Run commands from the VideoPrinterTurbo_LipSync project root.
 ## CPU unit tests
 
 These tests need the project's base dependencies, but no model weights, CUDA,
-PyTorch, OpenCV, network connection, or ffmpeg executable. External processes and
-network requests are mocked; filesystem checks use temporary directories.
+PyTorch, OpenCV or a network connection. Most external I/O is mocked and filesystem
+checks use temporary directories. `test_media_stream_unit.py` also exercises real
+FFmpeg when available; its FFmpeg cases skip when the tools are missing.
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -p '*_unit.py' -v
@@ -23,6 +24,9 @@ network requests are mocked; filesystem checks use temporary directories.
 | test_routes_unit.py | Bearer authentication, If-Range, reader release on errors and cancellation |
 | test_errors_unit.py | Worker-to-engine-to-job error propagation and bounded diagnostics |
 | test_face_boxes.py | Edge clipping, invalid boxes, frame diagnostics and preprocessing cleanup |
+| test_media_stream_unit.py | Real FFmpeg 4K encoding, fractional seeks, subprocess inactivity and cleanup |
+| test_audio_streaming.py | Global token alignment across 30-second boundaries and bounded CPU cache |
+| test_landmarks.py | All-missing/mixed face blocks bypass the upstream summary division by zero |
 | test_missing_faces_unit.py | Original-frame passthrough, mixed/empty inference batches and audio indices in both timeline modes |
 
 ## Full regression suite
@@ -30,15 +34,17 @@ network requests are mocked; filesystem checks use temporary directories.
 Install test dependencies in a network-enabled environment:
 
 ```bash
-uv sync --extra test
+uv sync --extra test --extra test-runtime
 .venv/bin/python -m pytest -q --cov=lipsync_service --cov=routers --cov=app --cov-report=term-missing
 ```
 
 The existing integration suite uses ffmpeg/ffprobe with libx264 and the sibling
 `../VideoPrinterTurbo/server` checkout to test the actual remote adapter. Some tests
 start localhost TCP servers and child processes. Tests using torch/OpenCV or
-PowerShell skip when those dependencies are absent. Install CPU torch, numpy and
-opencv-python to execute the mocked runtime generation tests in test_musetalk.py.
+PowerShell skip when those dependencies are absent. The `test-runtime` extra adds
+CPU-compatible torch/numpy/Pillow for the mocked runtime tests. Those tests use
+OpenCV when available and otherwise use a Pillow adapter; they do not validate
+OpenCV kernels or the real face models.
 The Windows helper tests include emulation; actual Windows process-tree behavior
 still needs a Windows runner.
 

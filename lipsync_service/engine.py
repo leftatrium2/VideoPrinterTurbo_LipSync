@@ -46,18 +46,24 @@ def validate_inputs(video: Path, audio: Path, timeline='strict') -> float:
     return duration
 
 
-def finalize_output(raw: Path, audio: Path, output: Path, duration: float):
+def finalize_output(raw: Path, audio: Path, output: Path, duration: float, *, media_idle_timeout=None):
+    def encode(args):
+        if media_idle_timeout is None:
+            ffmpeg(args)
+        else:
+            from .media_stream import run_ffmpeg
+            run_ffmpeg(args, stage='Final output validation/mux', idle_timeout=media_idle_timeout)
     if not raw.is_file() or not raw.stat().st_size:
         raise ValueError('Model did not create a nonempty output MP4')
     if abs(probe(raw, 'video') - duration) > .15:
         raise ValueError('Model changed the video timeline')
-    ffmpeg(['-i', raw, '-map', '0:v:0', '-f', 'null', '-'])
-    ffmpeg(['-i', raw, '-i', audio, '-map', '0:v:0', '-map', '1:a:0',
+    encode(['-i', raw, '-map', '0:v:0', '-f', 'null', '-'])
+    encode(['-i', raw, '-i', audio, '-map', '0:v:0', '-map', '1:a:0',
             '-c:v', 'copy', '-c:a', 'aac', '-movflags', '+faststart', output])
     if abs(probe(output, 'video') - duration) > .15:
         raise ValueError('Final output duration mismatch')
     probe(output, 'audio')
-    ffmpeg(['-i', output, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'])
+    encode(['-i', output, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'])
     raw.unlink()
 
 

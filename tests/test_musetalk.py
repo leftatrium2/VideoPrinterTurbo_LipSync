@@ -226,21 +226,30 @@ def test_low_fps_quantization_failure_is_explicit():
         output_frame_indices(3, 1, 1.9)
 
 
-def test_audio_features_keep_official_context_alignment():
+def test_audio_features_keep_official_context_alignment(tmp_path, monkeypatch):
     torch = pytest.importorskip('torch')
+    np = pytest.importorskip('numpy')
     from lipsync_service.musetalk_runtime import MuseTalkRuntime
+    from lipsync_service.audio_stream import AudioFeatures
     runtime = MuseTalkRuntime.__new__(MuseTalkRuntime)
     runtime.torch, runtime.device, runtime.dtype = torch, 'cpu', torch.float32
-    runtime.audio_processor = SimpleNamespace(get_audio_feature=lambda path: ([torch.zeros(1)], 16000))
+    runtime.audio_processor = SimpleNamespace(feature_extractor=lambda *a, **kw: SimpleNamespace(input_features=torch.zeros(1)))
     hidden = torch.arange(1500, dtype=torch.float32).reshape(1, 1500, 1).repeat(1, 1, 3)
     runtime.whisper = SimpleNamespace(encoder=lambda *a, **kw: SimpleNamespace(hidden_states=(hidden, hidden + 100)))
     encoded = torch.stack((hidden[:, :50], hidden[:, :50] + 100), dim=2)
     padded = torch.cat((torch.zeros(1, 4, 2, 3), encoded, torch.zeros(1, 12, 2, 3)), dim=1)
+    def decode(args, **kwargs):
+        Path(args[-1]).write_bytes(np.zeros(16000, dtype='<f4').tobytes())
+    monkeypatch.setattr('lipsync_service.audio_stream.run_ffmpeg', decode)
     for fps, count in ((25, 25), (Fraction(30000, 1001), 30)):
-        chunks = runtime._audio_features(Path('unused.wav'), count, fps)
-        reference = torch.cat([padded[:, int(i * 50 / fps):int(i * 50 / fps) + 10]
-                               for i in range(count)], dim=0).reshape(count, 20, 3)
-        assert torch.equal(chunks, reference)
+        stream = AudioFeatures(runtime, Path('unused.wav'), tmp_path)
+        try:
+            chunks = stream.features(list(range(count)), fps)
+            reference = torch.cat([padded[:, int(i * 50 / fps):int(i * 50 / fps) + 10]
+                                   for i in range(count)], dim=0).reshape(count, 20, 3)
+            assert torch.equal(chunks, reference)
+        finally:
+            stream.close()
 
 
 @pytest.mark.parametrize('timeline,audio_seconds,expected_count', [('strict', None, 30),
@@ -251,9 +260,10 @@ def test_audio_features_keep_official_context_alignment():
 ])
 def test_runtime_preserves_fractional_frame_count_and_skips_missing_face(tmp_path, timeline,
                                                                          audio_seconds, expected_count,
-                                                                         detected_box, expected_box):
+                                                                         detected_box, expected_box, monkeypatch):
     torch = pytest.importorskip('torch')
-    cv2 = pytest.importorskip('cv2')
+    from media_fixtures import load_cv2
+    cv2 = load_cv2(monkeypatch)
     import numpy as np
     from lipsync_service.musetalk_runtime import MuseTalkRuntime
     video, output = tmp_path / 'source with spaces.mp4', tmp_path / 'output.mp4'
@@ -266,12 +276,15 @@ def test_runtime_preserves_fractional_frame_count_and_skips_missing_face(tmp_pat
     runtime = MuseTalkRuntime.__new__(MuseTalkRuntime)
     runtime.torch, runtime.dtype, runtime.batch_size = torch, torch.float32, 4
     runtime.timeline = 'strict'
+    runtime.frame_memory_mb = .5  # Force several blocks even for tiny synthetic media.
     runtime.timesteps, runtime.fp = torch.tensor([0]), None
     runtime.no_face = (0., 0., 0., 0.)
-    original_frames, visited_frames = [], []
+    original_frames, visited_frames = {}, []
     def landmarks(paths, shift):
+        assert len(paths) <= 3
         frames = [cv2.imread(path) for path in paths]
-        original_frames.extend(frame.tobytes() for frame in frames)
+        for path, frame in zip(paths, frames):
+            original_frames.setdefault(int(Path(path).stem), frame.tobytes())
         return [detected_box] * len(paths), frames
     runtime.get_landmarks = landmarks
     runtime.vae = SimpleNamespace(get_latents_for_unet=lambda crop: torch.zeros(1, 8, 2, 2),
@@ -282,7 +295,16 @@ def test_runtime_preserves_fractional_frame_count_and_skips_missing_face(tmp_pat
         return SimpleNamespace(sample=latent)
     runtime.unet = SimpleNamespace(model=predict)
     runtime.pe = lambda value: value
-    runtime._audio_features = lambda audio, count, fps: torch.zeros(count, 50, 384)
+    audio_indices = []
+    class FakeAudio:
+        def __init__(self, *a, **kw):
+            pass
+        def features(self, indices, fps):
+            audio_indices.extend(indices)
+            return torch.zeros(len(indices), 50, 384)
+        def close(self):
+            pass
+    monkeypatch.setattr('lipsync_service.musetalk_runtime.AudioFeatures', FakeAudio)
     def blend(original, face, box, **kwargs):
         assert box == expected_box
         assert face.shape[:2] == (box[3] - box[1], box[2] - box[0])
@@ -293,8 +315,9 @@ def test_runtime_preserves_fractional_frame_count_and_skips_missing_face(tmp_pat
     assert video_timing(video) == (Fraction(30000, 1001), 30)
     assert video_timing(output) == (Fraction(30000, 1001), expected_count)
     assert sum(batch_sizes) == expected_count and max(batch_sizes) <= 4
-    cycle = original_frames + original_frames[::-1]
-    assert visited_frames == [cycle[i % len(cycle)] for i in range(expected_count)]
+    assert audio_indices == list(range(expected_count))
+    expected_indices = output_frame_indices(30, Fraction(30000, 1001), audio_seconds)
+    assert visited_frames == [original_frames[i] for i in expected_indices]
     runtime.get_landmarks = lambda paths, shift: ([runtime.no_face] * len(paths),
                                                  [cv2.imread(path) for path in paths])
     batch_sizes.clear()
@@ -314,7 +337,9 @@ def test_timing_rejects_vfr_and_preserves_fractional_rate(monkeypatch):
         @property
         def stdout(self):
             return json.dumps(info)
-    monkeypatch.setattr(musetalk_runtime.subprocess, 'run', lambda *a, **kw: Result())
+    monkeypatch.setattr(musetalk_runtime, 'video_metadata', lambda *a, **kw: info['streams'][0])
+    monkeypatch.setattr(musetalk_runtime, 'lines', lambda *a, **kw: (
+        f"best_effort_timestamp_time={frame['best_effort_timestamp_time']}" for frame in info['frames']))
     assert video_timing('ignored.mp4') == (Fraction(30000, 1001), 20)
     info['frames'][10]['best_effort_timestamp_time'] = '0.4'
     with pytest.raises(ValueError, match='constant frame rate'):
@@ -328,8 +353,8 @@ def test_workspace_is_independent_of_launch_directory(tmp_path):
     cwd = Path.cwd()
     prepare_workspace(source, models, workspace)
     prepare_workspace(source, models, workspace)
-    assert (workspace / 'models').resolve() == models
-    assert (workspace / 'musetalk').resolve() == source / 'musetalk'
+    assert (workspace / 'models').resolve() == models.resolve()
+    assert (workspace / 'musetalk').resolve() == (source / 'musetalk').resolve()
     assert Path.cwd() == cwd
 
 

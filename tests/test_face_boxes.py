@@ -48,23 +48,21 @@ class FaceBoxTests(unittest.TestCase):
                 output = Path(directory) / 'output.mp4'
                 runtime.get_landmarks = lambda paths, shift: ([(10, 20, 100, 80), box], [frame, frame])
 
-                def decode(args):
-                    pattern = Path(args[-1])
-                    for index in range(2):
-                        (pattern.parent / f'{index:08d}.png').touch()
-
-                with patch.dict(sys.modules, {'cv2': SimpleNamespace(), 'numpy': SimpleNamespace()}), \
-                     patch('lipsync_service.musetalk_runtime.video_timing', return_value=(Fraction(30), 2)), \
-                     patch('lipsync_service.musetalk_runtime.ffmpeg', side_effect=decode), \
-                     patch.object(runtime, '_audio_features') as audio_features:
+                from unittest.mock import Mock
+                audio_features = Mock()
+                write = Mock()
+                with patch.dict(sys.modules, {'cv2': SimpleNamespace(), 'numpy': SimpleNamespace()}):
                     with self.assertRaisesRegex(ValueError, message) as caught:
-                        runtime.run(Path('video.mp4'), Path('audio.wav'), output)
+                        runtime._process_block(['frame0', 'frame1'], [0, 1], 0, Fraction(30),
+                                               audio_features, write, lambda stage: None)
                     self.assertIn('frame 1 (0-based)', str(caught.exception))
                     self.assertIn(f'box={box}', str(caught.exception))
                     self.assertIn('image=720x1280', str(caught.exception))
-                    audio_features.assert_not_called()
+                    audio_features.features.assert_not_called()
+                    write.assert_not_called()
                 self.assertFalse(output.exists())
                 self.assertEqual(list(Path(directory).iterdir()), [])
+
 
 
 if __name__ == '__main__':

@@ -3,6 +3,7 @@
 Only imported inside the spawned worker. Upstream source is kept unchanged.
 """
 import json
+import logging
 import math
 import os
 import shutil
@@ -10,10 +11,44 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from fractions import Fraction
 from pathlib import Path
 
-from .engine import ffmpeg, probe
+from .engine import probe
+from .audio_stream import AudioFeatures
+from .media_stream import VideoFrames, frame_blocks, frame_count, lines, video_writer
+from .errors import InferenceError
+
+logger = logging.getLogger(__name__)
+
+
+def detect_landmarks(paths, preprocessing):
+    """Bounded adapter; upstream's summary divides by zero on all-no-face blocks."""
+    import cv2
+    import numpy as np
+    coords, frames = [], []
+    for path in paths:
+        frame = cv2.imread(path)
+        if frame is None:
+            raise ValueError('Could not read decoded video frame')
+        frames.append(frame)
+        detected = preprocessing.fa.get_detections_for_batch(np.asarray([frame]))[0]
+        if detected is None:
+            coords.append(preprocessing.coord_placeholder)
+            continue
+        results = preprocessing.merge_data_samples(preprocessing.inference_topdown(preprocessing.model, frame))
+        points = results.pred_instances.keypoints
+        if not len(points):
+            coords.append(detected)
+            continue
+        face = points[0][23:91].astype(np.int32)
+        middle = face[29][1]
+        box = (np.min(face[:, 0]), int(max(0, 2 * middle - np.max(face[:, 1]))),
+               np.max(face[:, 0]), np.max(face[:, 1]))
+        x1, y1, x2, y2 = box
+        coords.append(detected if y2 <= y1 or x2 <= x1 or x1 < 0 else box)
+    return coords, frames
 
 
 def normalize_face_box(box, width, height, frame_index):
@@ -30,23 +65,50 @@ def normalize_face_box(box, width, height, frame_index):
     return x1, y1, x2, min(y2 + 10, height)  # v15 extra_margin default
 
 
-def video_timing(video):
-    result = subprocess.run(
-        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
-         'stream=avg_frame_rate:frame=best_effort_timestamp_time', '-of', 'json', str(video)],
-        check=True, capture_output=True, text=True, timeout=120)
-    info = json.loads(result.stdout)
-    rate = Fraction(info['streams'][0]['avg_frame_rate'])
+def video_metadata(video, *, idle_timeout=120):
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+             'stream=avg_frame_rate,width,height:stream_side_data=rotation', '-of', 'json', str(video)],
+            check=True, capture_output=True, text=True, timeout=idle_timeout)
+    except subprocess.TimeoutExpired:
+        raise InferenceError(f'Video metadata probe timed out after {idle_timeout}s') from None
+    return json.loads(result.stdout)['streams'][0]
+
+
+def video_timing(video, *, idle_timeout=120, progress=None, metadata=None):
+    info = metadata if metadata is not None else video_metadata(video, idle_timeout=idle_timeout)
+    try:
+        rate = Fraction(info['avg_frame_rate'])
+    except (ValueError, ZeroDivisionError):
+        raise ValueError('Video has no valid frame rate') from None
     if rate <= 0:
         raise ValueError('Video has no valid frame rate')
-    timestamps = [float(frame['best_effort_timestamp_time']) for frame in info['frames']]
-    if not timestamps or any(not math.isfinite(t) for t in timestamps):
-        raise ValueError('Video has no valid frame timestamps')
     interval = 1 / float(rate)
-    if any(b <= a or abs(b - a - interval) > min(.002, interval / 10)
-           for a, b in zip(timestamps, timestamps[1:])):
-        raise ValueError('MuseTalk requires constant frame rate video; variable frame rate is unsupported')
-    return rate, len(timestamps)
+    previous, count = None, 0
+    command = ['ffprobe', '-v', 'error', '-threads', '2', '-select_streams', 'v:0', '-show_entries',
+               'frame=best_effort_timestamp_time', '-of', 'compact=p=0:nk=0', str(video)]
+    stream = lines(command, stage='Video timestamp validation', idle_timeout=idle_timeout, progress=progress)
+    try:
+        for line in stream:
+            fields = dict(field.split('=', 1) for field in line.split('|') if '=' in field)
+            if 'best_effort_timestamp_time' not in fields:
+                continue  # ffprobe may emit a separate side-data line.
+            try:
+                timestamp = float(fields['best_effort_timestamp_time'])
+            except ValueError:
+                raise ValueError('Video has no valid frame timestamps') from None
+            if not math.isfinite(timestamp):
+                raise ValueError('Video has no valid frame timestamps')
+            if previous is not None and (timestamp <= previous or
+                    abs(timestamp - previous - interval) > min(.002, interval / 10)):
+                raise ValueError('MuseTalk requires constant frame rate video; variable frame rate is unsupported')
+            previous, count = timestamp, count + 1
+    finally:
+        stream.close()
+    if not count:
+        raise ValueError('Video has no valid frame timestamps')
+    return rate, count
 
 
 def audio_window_indices(frame_count, fps):
@@ -152,13 +214,15 @@ class MuseTalkRuntime:
         from musetalk.utils.audio_processor import AudioProcessor
         from musetalk.utils.blending import get_image
         from musetalk.utils.face_parsing import FaceParsing
-        from musetalk.utils.preprocessing import get_landmark_and_bbox, coord_placeholder
+        from musetalk.utils.preprocessing import coord_placeholder
         from musetalk.utils.utils import load_all_model
 
         self.torch = torch
         self.device = torch.device('cuda:0')
         self.batch_size = settings['batch_size']
         self.timeline = settings['timeline']
+        self.frame_memory_mb = settings.get('frame_memory_mb', 256)
+        self.media_idle_timeout = settings.get('media_idle_timeout', 120)
         self.vae, self.unet, self.pe = load_all_model(
             unet_model_path=str(models / 'musetalkV15' / 'unet.pth'),
             unet_config=str(models / 'musetalkV15' / 'musetalk.json'),
@@ -172,92 +236,101 @@ class MuseTalkRuntime:
         self.whisper.to(device=self.device, dtype=self.dtype).eval().requires_grad_(False)
         self.fp = FaceParsing(left_cheek_width=90, right_cheek_width=90)
         self.get_image = get_image
-        self.get_landmarks = get_landmark_and_bbox
+        from musetalk.utils import preprocessing
+        self.get_landmarks = lambda paths, shift: detect_landmarks(paths, preprocessing)
         self.no_face = coord_placeholder
         self.timesteps = torch.tensor([0], device=self.device)
 
-    def _audio_features(self, audio, frame_count, fps):
-        torch = self.torch
-        features, length = self.audio_processor.get_audio_feature(str(audio))
-        encoded = [torch.stack(self.whisper.encoder(
-            feature.to(device=self.device, dtype=self.dtype),
-            output_hidden_states=True).hidden_states, dim=2) for feature in features]
-        encoded = torch.cat(encoded, dim=1)[:, :math.floor(length / 16000 * 50)]
-        if not encoded.shape[1]:
-            raise ValueError('Audio is too short for MuseTalk')
-        indices = audio_window_indices(frame_count, fps)
-        left = math.ceil(50 / float(fps)) * 2
-        window = 10  # official left/right padding 2, two audio tokens per step
-        right = max(window, indices[-1] + window - left - encoded.shape[1])
-        padded = torch.cat((encoded.new_zeros((1, left, *encoded.shape[2:])), encoded,
-                            encoded.new_zeros((1, right, *encoded.shape[2:]))), dim=1)
-        chunks = torch.cat([padded[:, i:i + window] for i in indices], dim=0)
-        return chunks.reshape(frame_count, -1, chunks.shape[-1])
-
-    def run(self, video, audio, output, *, timeline=None):
+    def _process_block(self, paths, source_indices, output_start, rate, audio_features, write, report):
         import cv2
         import numpy as np
         torch = self.torch
-        rate, expected_frames = video_timing(video)
+        coords, frames = self.get_landmarks(list(map(str, paths)), 0)
+        if len(coords) != len(paths) or len(frames) != len(paths):
+            raise ValueError('Face preprocessing frame count mismatch')
+        boxes = []
+        for box, frame, source_index in zip(coords, frames, source_indices):
+            boxes.append(None if tuple(box) == self.no_face else
+                         normalize_face_box(box, frame.shape[1], frame.shape[0], source_index))
+        report(f'Face detection finished at output frame {output_start}')
+        for start in range(0, len(paths), self.batch_size):
+            end = min(start + self.batch_size, len(paths))
+            active = [i for i in range(start, end) if boxes[i] is not None]
+            combined = list(frames[start:end])
+            if active:
+                chunks = audio_features.features([output_start + i for i in active], rate)
+                latents = []
+                for index in active:
+                    x1, y1, x2, y2 = boxes[index]
+                    crop = cv2.resize(frames[index][y1:y2, x1:x2], (256, 256),
+                                      interpolation=cv2.INTER_LANCZOS4)
+                    latents.append(self.vae.get_latents_for_unet(crop))
+                prediction = self.unet.model(
+                    torch.cat(latents).to(dtype=self.dtype), self.timesteps,
+                    encoder_hidden_states=self.pe(chunks)).sample
+                reconstructed = self.vae.decode_latents(prediction)
+                if len(reconstructed) != len(active):
+                    raise ValueError('Model output frame count mismatch')
+                for index, face in zip(active, reconstructed):
+                    x1, y1, x2, y2 = boxes[index]
+                    face = cv2.resize(face.astype(np.uint8), (x2 - x1, y2 - y1))
+                    combined[index - start] = self.get_image(frames[index].copy(), face, boxes[index],
+                                                            mode='jaw', fp=self.fp)
+            for frame in combined:
+                write(frame)
+            report(f'Inference finished at output frame {output_start + end}')
+
+    def run(self, video, audio, output, *, timeline=None):
+        torch = self.torch
         selected = getattr(self, 'timeline', 'strict') if timeline is None else timeline
         if selected not in ('strict', 'audio'):
             raise ValueError('Timeline must be strict or audio')
+        last_report = 0.
+
+        def report(stage):
+            nonlocal last_report
+            now = time.monotonic()
+            if now - last_report >= 1:
+                callback = getattr(self, 'progress', None)
+                if callback:
+                    callback(stage)
+                logger.info('MuseTalk progress: %s', stage)
+                last_report = now
+
+        idle = getattr(self, 'media_idle_timeout', 120)
+        metadata = video_metadata(video, idle_timeout=idle)
+        width, height = int(metadata['width']), int(metadata['height'])
+        rotation = next((float(item['rotation']) for item in metadata.get('side_data_list', [])
+                         if 'rotation' in item), 0)
+        if rotation % 90:
+            raise ValueError('MuseTalk supports video rotations in multiples of 90 degrees')
+        if rotation % 180:
+            width, height = height, width
+        if min(width, height) < 1:
+            raise ValueError('Video has invalid dimensions')
+        rate, source_count = video_timing(video, idle_timeout=idle, progress=report, metadata=metadata)
         audio_duration = probe(audio, 'audio') if selected == 'audio' else None
-        frame_indices = output_frame_indices(expected_frames, rate, audio_duration)
-        output_count = len(frame_indices)
-        with tempfile.TemporaryDirectory(prefix='musetalk-', dir=output.parent) as temp:
-            temp = Path(temp)
-            frames_dir, result_dir = temp / 'frames', temp / 'generated'
-            frames_dir.mkdir()
-            result_dir.mkdir()
-            ffmpeg(['-i', video, '-map', '0:v:0', '-vsync', '0', '-start_number', '0',
-                    frames_dir / '%08d.png'])
-            paths = sorted(frames_dir.glob('*.png'))
-            if len(paths) != expected_frames:
-                raise ValueError('Decoded video frame count mismatch')
-            with torch.inference_mode():
-                coords, frames = self.get_landmarks(list(map(str, paths)), 0)
-                if len(coords) != len(paths) or len(frames) != len(paths):
-                    raise ValueError('Face preprocessing frame count mismatch')
-                boxes = []
-                for frame_index, (box, frame) in enumerate(zip(coords, frames)):
-                    if tuple(box) == self.no_face:
-                        boxes.append(None)
-                        continue
-                    boxes.append(normalize_face_box(box, frame.shape[1], frame.shape[0], frame_index))
-                chunks = (self._audio_features(audio, output_count, rate)
-                          if any(boxes[index] is not None for index in frame_indices) else None)
-                for start in range(0, output_count, self.batch_size):
-                    end = min(start + self.batch_size, output_count)
-                    latents = []
-                    active_indices = []
-                    for index in range(start, end):
-                        source_index = frame_indices[index]
-                        if boxes[source_index] is None:
-                            # Preserve the frame and its audio position; skip only inference.
-                            shutil.copyfile(paths[source_index], result_dir / f'{index:08d}.png')
-                            continue
-                        active_indices.append(index)
-                        x1, y1, x2, y2 = boxes[source_index]
-                        crop = cv2.resize(frames[source_index][y1:y2, x1:x2], (256, 256),
-                                          interpolation=cv2.INTER_LANCZOS4)
-                        latents.append(self.vae.get_latents_for_unet(crop))
-                    if not active_indices:
-                        continue
-                    prediction = self.unet.model(
-                        torch.cat(latents).to(dtype=self.dtype), self.timesteps,
-                        encoder_hidden_states=self.pe(chunks[active_indices])).sample
-                    reconstructed = self.vae.decode_latents(prediction)
-                    if len(reconstructed) != len(active_indices):
-                        raise ValueError('Model output frame count mismatch')
-                    for index, face in zip(active_indices, reconstructed):
-                        source_index = frame_indices[index]
-                        x1, y1, x2, y2 = boxes[source_index]
-                        face = cv2.resize(face.astype(np.uint8), (x2 - x1, y2 - y1))
-                        combined = self.get_image(frames[source_index].copy(), face, boxes[source_index],
-                                                  mode='jaw', fp=self.fp)
-                        if not cv2.imwrite(str(result_dir / f'{index:08d}.png'), combined):
-                            raise RuntimeError('Could not write generated frame')
-            ffmpeg(['-framerate', str(rate), '-start_number', '0', '-i', result_dir / '%08d.png',
-                    '-frames:v', str(output_count), '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
-                    '-crf', '18', output])
+        output_count = frame_count(source_count, rate, audio_duration)
+        # Reserve 3x pixel storage for arrays, copies and pipe buffers. Decoder,
+        # encoder and model workspaces are additional, resolution-dependent costs.
+        budget = getattr(self, 'frame_memory_mb', 256) * 1024**2
+        limit = max(1, min(32, int(budget // (width * height * 3 * 3))))
+        logger.info('Streaming %sx%s at %s FPS: %s output frames, block size %s',
+                    width, height, rate, output_count, limit)
+        with tempfile.TemporaryDirectory(prefix='musetalk-', dir=output.parent) as directory:
+            directory = Path(directory)
+            audio_features = AudioFeatures(self, audio, directory, idle_timeout=idle, progress=report)
+            decoder = VideoFrames(video, width, height, rate, source_count,
+                                  idle_timeout=idle, progress=report)
+            try:
+                with torch.inference_mode(), video_writer(output, width, height, rate,
+                                                          idle_timeout=idle, progress=report) as write:
+                    for output_start, source_indices in frame_blocks(source_count, output_count, limit):
+                        report(f'Video block starting at output frame {output_start}/{output_count}')
+                        with tempfile.TemporaryDirectory(prefix='frames-', dir=directory) as block:
+                            paths = decoder.block(source_indices, Path(block))
+                            self._process_block(paths, source_indices, output_start, rate,
+                                                audio_features, write, report)
+            finally:
+                decoder.close()
+                audio_features.close()

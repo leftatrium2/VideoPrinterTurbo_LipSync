@@ -39,6 +39,11 @@ def main():
     engine = MuseTalkEngine(model_dir=os.environ.get('LIPSYNC_MODEL_DIR'),
                             gpu=os.environ.get('LIPSYNC_GPU', '0'),
                             batch_size=int(os.environ.get('LIPSYNC_BATCH_SIZE', '1')),
+                            timeout=float(os.environ.get('LIPSYNC_INFERENCE_TIMEOUT', '0')),
+                            startup_timeout=float(os.environ.get('LIPSYNC_STARTUP_TIMEOUT', '600')),
+                            idle_timeout=float(os.environ.get('LIPSYNC_IDLE_TIMEOUT', '600')),
+                            media_idle_timeout=float(os.environ.get('LIPSYNC_MEDIA_IDLE_TIMEOUT', '120')),
+                            frame_memory_mb=int(os.environ.get('LIPSYNC_FRAME_MEMORY_MB', '256')),
                             use_float16=os.environ.get('LIPSYNC_FLOAT16', '1') == '1', timeline=args.timeline)
     records = []
     try:

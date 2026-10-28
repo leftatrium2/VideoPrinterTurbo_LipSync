@@ -6,6 +6,10 @@ class InferenceError(RuntimeError):
     """An inference failure whose diagnostic may be returned to the caller."""
 
 
+class InferenceTimeout(InferenceError, TimeoutError):
+    """A timeout that retains its stage diagnostic in job responses."""
+
+
 def inference_detail(exc):
     # Subprocess exception strings can contain entire commands and their secrets.
     if isinstance(exc, subprocess.CalledProcessError):

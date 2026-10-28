@@ -44,3 +44,20 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(SubmitSpec().timeline, 'strict')
         with self.assertRaises(ValidationError):
             SubmitSpec(timeline='invalid')
+
+    def test_streaming_limits_and_optional_total_deadline(self):
+        with patch.dict(os.environ, {}, clear=True):
+            configured = create_app().state.engine
+            self.assertEqual(configured.timeout, 0)
+            self.assertEqual(configured.idle_timeout, 600)
+            self.assertEqual(configured.settings['frame_memory_mb'], 256)
+        for key, values in {
+            'LIPSYNC_INFERENCE_TIMEOUT': ('-1', 'nan', 'inf'),
+            'LIPSYNC_IDLE_TIMEOUT': ('0', '-1', 'nan'),
+            'LIPSYNC_MEDIA_IDLE_TIMEOUT': ('0', '-1', 'inf'),
+            'LIPSYNC_FRAME_MEMORY_MB': ('0', '-1', 'bad'),
+        }.items():
+            for value in values:
+                with self.subTest(key=key, value=value), patch.dict(os.environ, {key: value}, clear=True):
+                    with self.assertRaises(ValueError):
+                        create_app()

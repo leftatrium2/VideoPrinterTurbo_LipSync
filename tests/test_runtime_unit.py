@@ -27,7 +27,8 @@ class RuntimeTests(unittest.TestCase):
             info = {'streams': [{'avg_frame_rate': rate}],
                     'frames': [{'best_effort_timestamp_time': str(t)} for t in timestamps]}
             with self.subTest(rate=rate, timestamps=timestamps), \
-                 patch.object(runtime.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps(info))), \
+                 patch.object(runtime, 'video_metadata', return_value=info['streams'][0]), \
+                 patch.object(runtime, 'lines', side_effect=lambda *a, **kw: (f'best_effort_timestamp_time={t}' for t in timestamps)), \
                  self.assertRaises(ValueError):
                 runtime.video_timing('video.mp4')
 
@@ -73,3 +74,28 @@ class RuntimeTests(unittest.TestCase):
                 engine._receive(1)
         with self.assertRaises(TimeoutError):
             MuseTalkEngine()._receive(0)
+
+    def test_progress_refreshes_idle_deadline_but_not_total_deadline(self):
+        from lipsync_service.errors import InferenceTimeout
+        from lipsync_service import musetalk_engine
+        for total, replies, expected in [
+                (None, [('progress', 'decode')] * 4 + [('done', None)], None),
+                (.1, [('progress', 'decode')] * 10, 'total inference time limit'),
+                (None, [], 'no progress')]:
+            with self.subTest(total=total, expected=expected):
+                clock = SimpleNamespace(value=0.)
+                def poll(timeout):
+                    clock.value += .04
+                    return bool(replies)
+                engine = MuseTalkEngine()
+                engine._connection = Mock()
+                engine._connection.poll.side_effect = poll
+                engine._connection.recv.side_effect = replies
+                engine._process = Mock()
+                engine._process.is_alive.return_value = True
+                with patch.object(musetalk_engine.time, 'monotonic', side_effect=lambda: clock.value):
+                    if expected is None:
+                        self.assertEqual(engine._receive(total, idle_timeout=.07), ('done', None))
+                    else:
+                        with self.assertRaisesRegex(InferenceTimeout, expected):
+                            engine._receive(total, idle_timeout=.07)
