@@ -120,7 +120,32 @@ class Service:
             if job is None:
                 raise HTTPException(404, 'Job expired, unknown, or service restarted')
             self.get(job['upload_id'])
-            return dict(job)
+            view = dict(job)
+            view['progress'] = dict(job.get('progress', {}))
+            if job['status'] == 'queued':
+                ahead = 0
+                for candidate in self.jobs.values():
+                    if candidate['job_id'] == jid:
+                        break
+                    ahead += candidate['status'] in ('queued', 'running')
+                view['progress']['queue_position'] = ahead
+            return view
+
+    def update_progress(self, jid, event):
+        if not isinstance(event, dict) or not isinstance(event.get('stage'), str):
+            return
+        with self.lock:
+            job = self.jobs.get(jid)
+            if job is None or job['status'] != 'running':
+                return
+            value = {'stage': event['stage'][:100], 'percent': None}
+            completed, total = event.get('completed'), event.get('total')
+            if type(completed) is int and completed >= 0:
+                unit = event.get('unit') if event.get('unit') in ('frames', 'bytes') else None
+                value.update(completed=completed, unit=unit)
+                if type(total) is int and total >= completed and total > 0:
+                    value.update(total=total, percent=round(100 * completed / total, 2))
+            job['progress'] = value
 
     def submit(self, uid, timeline='strict'):
         if timeline not in ('strict', 'audio'):
@@ -148,11 +173,12 @@ class Service:
             with self.lock:
                 jid = uuid.uuid4().hex
                 job = {'job_id': jid, 'upload_id': uid, 'status': 'queued', 'error': None, 'result': None,
-                       'timeline': timeline, 'expected_duration': None}
+                       'timeline': timeline, 'expected_duration': None,
+                       'progress': {'stage': 'queued', 'percent': None}}
                 self.jobs[jid] = job
                 upload.job_id = jid
                 self.queue.put(jid)
-                return dict(job)
+                return self.job(jid)
         finally:
             upload.lock.release()
 
@@ -190,8 +216,12 @@ class Service:
                 job = self.jobs[jid]
                 upload = self.uploads[job['upload_id']]
                 job['status'] = 'running'
+                job['progress'] = {'stage': 'preparing', 'percent': None}
             output = upload.directory / 'result.mp4'
+            previous_progress = getattr(self.engine, 'on_progress', None)
             try:
+                if hasattr(self.engine, 'on_progress'):
+                    self.engine.on_progress = lambda event: self.update_progress(jid, event)
                 video, audio = upload.files['video']['path'], upload.files['audio']['path']
                 expected = validate_inputs(video, audio, job['timeline'])
                 with self.lock:
@@ -204,15 +234,19 @@ class Service:
                     raise ValueError('Engine returned an empty output')
                 result = {'size': output.stat().st_size, 'sha256': digest(output)}
                 with self.lock:
-                    job.update(status='succeeded', result=result)
+                    job.update(status='succeeded', result=result,
+                               progress={'stage': 'completed', 'percent': 100})
             except Exception as exc:
                 logger.exception('LipSync job %s failed', jid)
                 output.unlink(missing_ok=True)
                 with self.lock:
                     # InferenceError contains a bounded worker diagnostic, not raw logs.
                     detail = str(exc) if isinstance(exc, (ValueError, InferenceError)) else type(exc).__name__
-                    job.update(status='failed', error=detail[:2000])
+                    job.update(status='failed', error=detail[:2000],
+                               progress={'stage': 'failed', 'percent': None})
             finally:
+                if hasattr(self.engine, 'on_progress'):
+                    self.engine.on_progress = previous_progress
                 with self.lock:
                     upload.touched = time.monotonic()
                 self.queue.task_done()

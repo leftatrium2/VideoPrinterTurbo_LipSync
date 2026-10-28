@@ -69,7 +69,7 @@ def video_metadata(video, *, idle_timeout=120):
     try:
         result = subprocess.run(
             ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
-             'stream=avg_frame_rate,width,height:stream_side_data=rotation', '-of', 'json', str(video)],
+             'stream=avg_frame_rate,width,height,nb_frames:stream_side_data=rotation', '-of', 'json', str(video)],
             check=True, capture_output=True, text=True, timeout=idle_timeout)
     except subprocess.TimeoutExpired:
         raise InferenceError(f'Video metadata probe timed out after {idle_timeout}s') from None
@@ -88,7 +88,9 @@ def video_timing(video, *, idle_timeout=120, progress=None, metadata=None):
     previous, count = None, 0
     command = ['ffprobe', '-v', 'error', '-threads', '2', '-select_streams', 'v:0', '-show_entries',
                'frame=best_effort_timestamp_time', '-of', 'compact=p=0:nk=0', str(video)]
-    stream = lines(command, stage='Video timestamp validation', idle_timeout=idle_timeout, progress=progress)
+    advertised = info.get('nb_frames', '')
+    total = int(advertised) if isinstance(advertised, str) and advertised.isdigit() and int(advertised) > 0 else None
+    stream = lines(command, stage='Video timestamp validation', idle_timeout=idle_timeout)
     try:
         for line in stream:
             fields = dict(field.split('=', 1) for field in line.split('|') if '=' in field)
@@ -104,6 +106,8 @@ def video_timing(video, *, idle_timeout=120, progress=None, metadata=None):
                     abs(timestamp - previous - interval) > min(.002, interval / 10)):
                 raise ValueError('MuseTalk requires constant frame rate video; variable frame rate is unsupported')
             previous, count = timestamp, count + 1
+            if progress:
+                progress({"stage": "timestamp_validation", "completed": count, "total": total, "unit": "frames"})
     finally:
         stream.close()
     if not count:
@@ -278,7 +282,7 @@ class MuseTalkRuntime:
                                                             mode='jaw', fp=self.fp)
             for frame in combined:
                 write(frame)
-            report(f'Inference finished at output frame {output_start + end}')
+            report({'stage': 'inference', 'completed': output_start + end, 'unit': 'frames'})
 
     def run(self, video, audio, output, *, timeline=None):
         torch = self.torch
@@ -286,15 +290,23 @@ class MuseTalkRuntime:
         if selected not in ('strict', 'audio'):
             raise ValueError('Timeline must be strict or audio')
         last_report = 0.
+        current = {'stage': 'timestamp_validation'}
+        output_count = None
 
-        def report(stage):
-            nonlocal last_report
+        def report(update):
+            nonlocal last_report, current
+            changed = isinstance(update, dict) and update.get('stage') != current.get('stage')
+            if isinstance(update, dict):
+                current = dict(update)
+                if current.get('stage') == 'inference':
+                    current['total'] = output_count
             now = time.monotonic()
-            if now - last_report >= 1:
+            if changed or now - last_report >= 1 or (isinstance(update, dict) and update.get('stage') == 'inference'):
                 callback = getattr(self, 'progress', None)
                 if callback:
-                    callback(stage)
-                logger.info('MuseTalk progress: %s', stage)
+                    callback(dict(current))
+                if now - last_report >= 1:
+                    logger.info('MuseTalk progress: %s', update)
                 last_report = now
 
         idle = getattr(self, 'media_idle_timeout', 120)
@@ -311,6 +323,7 @@ class MuseTalkRuntime:
         rate, source_count = video_timing(video, idle_timeout=idle, progress=report, metadata=metadata)
         audio_duration = probe(audio, 'audio') if selected == 'audio' else None
         output_count = frame_count(source_count, rate, audio_duration)
+        report({'stage': 'inference', 'completed': 0, 'total': output_count, 'unit': 'frames'})
         # Reserve 3x pixel storage for arrays, copies and pipe buffers. Decoder,
         # encoder and model workspaces are additional, resolution-dependent costs.
         budget = getattr(self, 'frame_memory_mb', 256) * 1024**2
@@ -331,6 +344,7 @@ class MuseTalkRuntime:
                             paths = decoder.block(source_indices, Path(block))
                             self._process_block(paths, source_indices, output_start, rate,
                                                 audio_features, write, report)
+                    report({'stage': 'encoding_finalize'})
             finally:
                 decoder.close()
                 audio_features.close()

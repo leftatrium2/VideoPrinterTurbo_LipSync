@@ -89,6 +89,7 @@ class MuseTalkEngine:
             raise ValueError('Startup/idle timeouts and frame memory budget must be finite and positive')
         self.timeout, self.startup_timeout = timeout, startup_timeout
         self.idle_timeout = idle_timeout
+        self.on_progress = None
         self.settings = {
             'source': str(ROOT / 'third_party' / 'MuseTalk'),
             'models': str(Path(model_dir or ROOT / 'models').resolve()),
@@ -113,6 +114,13 @@ class MuseTalkEngine:
         except ValueError:  # A concurrent recovery has just closed this process.
             return False
 
+    def _notify_progress(self, event):
+        if self.on_progress:
+            try:
+                self.on_progress(event)
+            except Exception as exc:
+                logger.warning('MuseTalk progress callback failed (%s)', type(exc).__name__)
+
     def _receive(self, timeout, *, idle_timeout=None):
         deadline = time.monotonic() + timeout if timeout is not None else math.inf
         idle_deadline = time.monotonic() + idle_timeout if idle_timeout is not None else math.inf
@@ -123,6 +131,7 @@ class MuseTalkEngine:
                     status, detail = self._connection.recv()
                     if status == 'progress':
                         stage = str(detail)[:500]
+                        self._notify_progress(detail)
                         if idle_timeout is not None:
                             idle_deadline = time.monotonic() + idle_timeout
                         continue
@@ -258,6 +267,7 @@ class MuseTalkEngine:
                 status, detail = self._receive(self.timeout or None, idle_timeout=self.idle_timeout)
                 if status != 'done':
                     raise InferenceError(detail)
+                self._notify_progress({'stage': 'finalizing'})
                 finalize_output(raw, audio, output, duration,
                                 media_idle_timeout=self.settings['media_idle_timeout'])
             except Exception:

@@ -68,3 +68,22 @@ Client readiness waiting defaults to 600 seconds, bounded by the 7200-second job
 The budget starts after input preflight/hashing and covers transfers, queue/model waiting
 and result validation. API 503 recovery queries health with a bounded deadline; other
 retryable network errors retain the configured retry count. Auth/input errors fail fast.
+
+### Progress (optional, additive)
+
+`GET /v1/jobs/{id}` and submit responses include `progress`, for example:
+
+```json
+{"stage":"inference","percent":25.0,"completed":320,"total":1280,"unit":"frames"}
+```
+
+`percent` is scoped to `stage`, not to the entire upload/generate/download workflow.
+Unknown totals/percentages are null or omitted. Queued jobs include a live
+`queue_position` (number of queued/running jobs ahead, zero means none).
+Timestamp validation counts frames when available; inference counts all processed
+output frames, including unchanged no-face frames. Stages also include `preparing`,
+`timestamp_validation`, `encoding_finalize`, `finalizing`, `completed`, `failed`.
+Completion of frame processing may report 100 while encoding/mux/validation is
+still pending; only job status `succeeded` makes the result available. Older clients
+may ignore this additive field. New clients fall back to status and elapsed time
+when connected to older servers without progress.
