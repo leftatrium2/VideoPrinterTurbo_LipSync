@@ -193,6 +193,29 @@ def test_fractional_fps_does_not_accumulate_audio_drift():
     assert abs(indices[-1] / 50 - 17999 / float(fps)) < .02
 
 
+@pytest.mark.parametrize('box,expected', [
+    ((20, 20, 100, 80), (20, 20, 100, 90)),
+    ((-15, -10, 735, 1290), (0, 0, 720, 1280)),
+    ((0, 308, 244, 658), (0, 308, 244, 668)),
+    ((10, 1200, 100, 1278), (10, 1200, 100, 1280)),
+])
+def test_face_box_clips_edges_and_preserves_margin(box, expected):
+    from lipsync_service.musetalk_runtime import normalize_face_box
+    assert normalize_face_box(box, 720, 1280, 42) == expected
+
+
+@pytest.mark.parametrize('box', [
+    (-20, 10, -1, 100), (721, 10, 740, 100),
+    (10, 1281, 100, 1300), (10, -20, 100, -1),
+    (100, 20, 10, 80), (10, 80, 100, 80),
+    (float('nan'), 20, 100, 80), (10, 20, float('inf'), 80),
+])
+def test_invalid_face_box_reports_frame_and_coordinates(box):
+    from lipsync_service.musetalk_runtime import normalize_face_box
+    with pytest.raises(ValueError, match=r'frame 42 .*box=.*image=720x1280'):
+        normalize_face_box(box, 720, 1280, 42)
+
+
 def test_exact_fractional_audio_duration_does_not_drop_a_frame():
     indices = output_frame_indices(30, Fraction(30000, 1001), 2.002)
     assert indices == list(range(30)) + list(range(29, -1, -1))
@@ -222,8 +245,13 @@ def test_audio_features_keep_official_context_alignment():
 
 @pytest.mark.parametrize('timeline,audio_seconds,expected_count', [('strict', None, 30),
                                                                  ('audio', 2.1, 62), ('audio', .6, 17)])
+@pytest.mark.parametrize('detected_box,expected_box', [
+    ((20, 20, 100, 80), (20, 20, 100, 90)),
+    ((-10, -5, 170, 130), (0, 0, 160, 120)),
+])
 def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_path, timeline,
-                                                                         audio_seconds, expected_count):
+                                                                         audio_seconds, expected_count,
+                                                                         detected_box, expected_box):
     torch = pytest.importorskip('torch')
     cv2 = pytest.importorskip('cv2')
     import numpy as np
@@ -244,7 +272,7 @@ def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_p
     def landmarks(paths, shift):
         frames = [cv2.imread(path) for path in paths]
         original_frames.extend(frame.tobytes() for frame in frames)
-        return [(20, 20, 100, 80)] * len(paths), frames
+        return [detected_box] * len(paths), frames
     runtime.get_landmarks = landmarks
     runtime.vae = SimpleNamespace(get_latents_for_unet=lambda crop: torch.zeros(1, 8, 2, 2),
                                   decode_latents=lambda latent: np.zeros((len(latent), 256, 256, 3), dtype=np.uint8))
@@ -256,6 +284,8 @@ def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_p
     runtime.pe = lambda value: value
     runtime._audio_features = lambda audio, count, fps: torch.zeros(count, 50, 384)
     def blend(original, face, box, **kwargs):
+        assert box == expected_box
+        assert face.shape[:2] == (box[3] - box[1], box[2] - box[0])
         visited_frames.append(original.tobytes())
         return original
     runtime.get_image = blend

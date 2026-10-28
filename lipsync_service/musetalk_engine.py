@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from .engine import finalize_output, validate_inputs
+from .errors import InferenceError, inference_detail
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,9 +53,10 @@ def _worker(connection, settings):
                     try:
                         runtime.run(video, audio, output, timeline=timeline)
                         connection.send(('done', None))
-                    except Exception:
+                    except Exception as exc:
                         logger.exception('MuseTalk inference failed')
-                        connection.send(('error', 'MuseTalk inference failed; inspect inference.log'))
+                        connection.send(('error', f'MuseTalk inference failed: {inference_detail(exc)}; '
+                                         'full traceback: inference.log'))
                     finally:
                         os.dup2(log.fileno(), 1)
                         os.dup2(log.fileno(), 2)
@@ -236,7 +238,7 @@ class MuseTalkEngine:
                 self._connection.send((*map(str, (video, audio, raw)), timeline))
                 status, detail = self._receive(self.timeout)
                 if status != 'done':
-                    raise RuntimeError(detail)
+                    raise InferenceError(detail)
                 finalize_output(raw, audio, output, duration)
             except Exception:
                 self._stop()

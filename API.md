@@ -16,6 +16,14 @@ Success JSON: `{code: 0, msg: "success", data: ...}`. Errors use HTTP status and
 
 Session: `{upload_id, files: {video: {size,sha256,offset}, audio: ...}, job_id}`.
 Job: `{job_id, upload_id, status, error, timeline, expected_duration, result: null|{size,sha256}}`.
+
+For failed jobs, `error` remains a string. MuseTalk inference failures include the
+underlying exception type and message (including frame/box diagnostics when
+available), limited to 2000 characters. Full tracebacks remain in the task's
+`inference.log`. Subprocess commands and raw subprocess logs are not returned.
+Existing clients that display `job.error` receive these details without changes.
+Only newly executed jobs use the improved diagnostics; old failed jobs retain
+their original stored error.
 `timeline` defaults to `strict` for an absent body. Retrying submit with the same mode
 returns the original job, including failed jobs; a different mode returns 409.
 `expected_duration` is null while queued/before input validation, otherwise seconds.

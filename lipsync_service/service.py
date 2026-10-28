@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from .engine import digest, validate_inputs
+from .errors import InferenceError
 from .storage import StorageLock
 
 logger = logging.getLogger(__name__)
@@ -208,9 +209,9 @@ class Service:
                 logger.exception('LipSync job %s failed', jid)
                 output.unlink(missing_ok=True)
                 with self.lock:
-                    # Do not expose command arguments, paths, or subprocess logs over HTTP.
-                    detail = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
-                    job.update(status='failed', error=detail[:500])
+                    # InferenceError contains a bounded worker diagnostic, not raw logs.
+                    detail = str(exc) if isinstance(exc, (ValueError, InferenceError)) else type(exc).__name__
+                    job.update(status='failed', error=detail[:2000])
             finally:
                 with self.lock:
                     upload.touched = time.monotonic()

@@ -165,10 +165,14 @@ def test_job_mode_and_duration_mismatch_are_not_published(tmp_path, media, trans
         assert not output.exists()
 
 
-def test_failed_audio_job_is_not_automatically_resubmitted(tmp_path, media, transport):
+@pytest.mark.parametrize('failure_kind', ['validation', 'inference'])
+def test_failed_audio_job_is_not_automatically_resubmitted(tmp_path, media, transport, failure_kind):
+    from lipsync_service.errors import InferenceError
+    failure = (ValueError('Invalid face input') if failure_kind == 'validation' else
+               InferenceError('MuseTalk inference failed: ValueError: Invalid face input; frame 42'))
     class Failed(TimelineFixture):
         def run_timeline(self, *args, **kwargs):
-            raise ValueError('Invalid face input')
+            raise failure
     app = create_app(engine=Failed(), storage=tmp_path / 'server')
     with transfer.live(app) as url:
         for _ in range(2):

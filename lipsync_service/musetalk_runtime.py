@@ -16,6 +16,20 @@ from pathlib import Path
 from .engine import ffmpeg, probe
 
 
+def normalize_face_box(box, width, height, frame_index):
+    """Clip detector coordinates before cropping; never repair an empty box."""
+    detail = (f'frame {frame_index} (0-based), box={tuple(box)}, '
+              f'image={width}x{height}')
+    if len(box) != 4 or not all(math.isfinite(value) for value in box):
+        raise ValueError(f'Invalid face bounding box: {detail}')
+    x1, y1, x2, y2 = map(int, box)
+    x1, x2 = max(0, min(x1, width)), max(0, min(x2, width))
+    y1, y2 = max(0, min(y1, height)), max(0, min(y2, height))
+    if x1 >= x2 or y1 >= y2:
+        raise ValueError(f'Invalid face bounding box after clipping: {detail}')
+    return x1, y1, x2, min(y2 + 10, height)  # v15 extra_margin default
+
+
 def video_timing(video):
     result = subprocess.run(
         ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries',
@@ -206,14 +220,11 @@ class MuseTalkRuntime:
                 if len(coords) != len(paths) or len(frames) != len(paths):
                     raise ValueError('Face preprocessing frame count mismatch')
                 boxes = []
-                for box, frame in zip(coords, frames):
+                for frame_index, (box, frame) in enumerate(zip(coords, frames)):
                     if tuple(box) == self.no_face:
-                        raise ValueError('A video frame has no detectable face')
-                    x1, y1, x2, y2 = map(int, box)
-                    y2 = min(y2 + 10, frame.shape[0])  # v15 extra_margin default
-                    if not (0 <= x1 < x2 <= frame.shape[1] and 0 <= y1 < y2 <= frame.shape[0]):
-                        raise ValueError('Invalid face bounding box')
-                    boxes.append((x1, y1, x2, y2))
+                        raise ValueError(f'A video frame has no detectable face: frame {frame_index} (0-based), '
+                                         f'box={tuple(box)}, image={frame.shape[1]}x{frame.shape[0]}')
+                    boxes.append(normalize_face_box(box, frame.shape[1], frame.shape[0], frame_index))
                 chunks = self._audio_features(audio, output_count, rate)
                 for start in range(0, output_count, self.batch_size):
                     end = min(start + self.batch_size, output_count)
