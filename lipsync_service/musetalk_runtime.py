@@ -222,26 +222,35 @@ class MuseTalkRuntime:
                 boxes = []
                 for frame_index, (box, frame) in enumerate(zip(coords, frames)):
                     if tuple(box) == self.no_face:
-                        raise ValueError(f'A video frame has no detectable face: frame {frame_index} (0-based), '
-                                         f'box={tuple(box)}, image={frame.shape[1]}x{frame.shape[0]}')
+                        boxes.append(None)
+                        continue
                     boxes.append(normalize_face_box(box, frame.shape[1], frame.shape[0], frame_index))
-                chunks = self._audio_features(audio, output_count, rate)
+                chunks = (self._audio_features(audio, output_count, rate)
+                          if any(boxes[index] is not None for index in frame_indices) else None)
                 for start in range(0, output_count, self.batch_size):
                     end = min(start + self.batch_size, output_count)
                     latents = []
+                    active_indices = []
                     for index in range(start, end):
                         source_index = frame_indices[index]
+                        if boxes[source_index] is None:
+                            # Preserve the frame and its audio position; skip only inference.
+                            shutil.copyfile(paths[source_index], result_dir / f'{index:08d}.png')
+                            continue
+                        active_indices.append(index)
                         x1, y1, x2, y2 = boxes[source_index]
                         crop = cv2.resize(frames[source_index][y1:y2, x1:x2], (256, 256),
                                           interpolation=cv2.INTER_LANCZOS4)
                         latents.append(self.vae.get_latents_for_unet(crop))
+                    if not active_indices:
+                        continue
                     prediction = self.unet.model(
                         torch.cat(latents).to(dtype=self.dtype), self.timesteps,
-                        encoder_hidden_states=self.pe(chunks[start:end])).sample
+                        encoder_hidden_states=self.pe(chunks[active_indices])).sample
                     reconstructed = self.vae.decode_latents(prediction)
-                    if len(reconstructed) != end - start:
+                    if len(reconstructed) != len(active_indices):
                         raise ValueError('Model output frame count mismatch')
-                    for index, face in zip(range(start, end), reconstructed):
+                    for index, face in zip(active_indices, reconstructed):
                         source_index = frame_indices[index]
                         x1, y1, x2, y2 = boxes[source_index]
                         face = cv2.resize(face.astype(np.uint8), (x2 - x1, y2 - y1))

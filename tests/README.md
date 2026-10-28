@@ -23,6 +23,7 @@ network requests are mocked; filesystem checks use temporary directories.
 | test_routes_unit.py | Bearer authentication, If-Range, reader release on errors and cancellation |
 | test_errors_unit.py | Worker-to-engine-to-job error propagation and bounded diagnostics |
 | test_face_boxes.py | Edge clipping, invalid boxes, frame diagnostics and preprocessing cleanup |
+| test_missing_faces_unit.py | Original-frame passthrough, mixed/empty inference batches and audio indices in both timeline modes |
 
 ## Full regression suite
 

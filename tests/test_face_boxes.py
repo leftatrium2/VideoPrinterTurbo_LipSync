@@ -43,8 +43,7 @@ class FaceBoxTests(unittest.TestCase):
         runtime.torch = SimpleNamespace(inference_mode=nullcontext)
         runtime.no_face = (0., 0., 0., 0.)
         frame = SimpleNamespace(shape=(1280, 720, 3))
-        for box, message in [((721, 10, 740, 100), 'Invalid face bounding box'),
-                             (runtime.no_face, 'no detectable face')]:
+        for box, message in [((721, 10, 740, 100), 'Invalid face bounding box')]:
             with self.subTest(box=box), tempfile.TemporaryDirectory() as directory:
                 output = Path(directory) / 'output.mp4'
                 runtime.get_landmarks = lambda paths, shift: ([(10, 20, 100, 80), box], [frame, frame])

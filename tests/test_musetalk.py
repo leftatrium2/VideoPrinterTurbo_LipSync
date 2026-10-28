@@ -249,7 +249,7 @@ def test_audio_features_keep_official_context_alignment():
     ((20, 20, 100, 80), (20, 20, 100, 90)),
     ((-10, -5, 170, 130), (0, 0, 160, 120)),
 ])
-def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_path, timeline,
+def test_runtime_preserves_fractional_frame_count_and_skips_missing_face(tmp_path, timeline,
                                                                          audio_seconds, expected_count,
                                                                          detected_box, expected_box):
     torch = pytest.importorskip('torch')
@@ -297,9 +297,13 @@ def test_runtime_preserves_fractional_frame_count_and_rejects_missing_face(tmp_p
     assert visited_frames == [cycle[i % len(cycle)] for i in range(expected_count)]
     runtime.get_landmarks = lambda paths, shift: ([runtime.no_face] * len(paths),
                                                  [cv2.imread(path) for path in paths])
-    with pytest.raises(ValueError, match='no detectable face'):
-        runtime.run(video, audio, tmp_path / 'must-not-exist.mp4', timeline=timeline)
-    assert not (tmp_path / 'must-not-exist.mp4').exists()
+    batch_sizes.clear()
+    visited_frames.clear()
+    passthrough = tmp_path / 'no-faces.mp4'
+    runtime.run(video, audio, passthrough, timeline=timeline)
+    assert video_timing(passthrough) == (Fraction(30000, 1001), expected_count)
+    assert batch_sizes == []
+    assert visited_frames == []
 
 
 def test_timing_rejects_vfr_and_preserves_fractional_rate(monkeypatch):
