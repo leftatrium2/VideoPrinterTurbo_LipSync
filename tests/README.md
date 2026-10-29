@@ -26,6 +26,8 @@ FFmpeg when available; its FFmpeg cases skip when the tools are missing.
 | test_face_boxes.py | Edge clipping, invalid boxes, frame diagnostics and preprocessing cleanup |
 | test_media_stream_unit.py | Real FFmpeg 4K encoding, fractional seeks, subprocess inactivity and cleanup |
 | test_audio_streaming.py | Global token alignment across 30-second boundaries and bounded CPU cache |
+| test_memory_frames.py | No PNG intermediates, forward decoder reuse and reversed block ordering |
+| test_performance_paths.py | Proxy coordinate mapping, full-size miss fallback, batched VAE contracts and timing attribution |
 | test_landmarks.py | All-missing/mixed face blocks bypass the upstream summary division by zero |
 | test_missing_faces_unit.py | Original-frame passthrough, mixed/empty inference batches and audio indices in both timeline modes |
 

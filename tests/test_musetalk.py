@@ -279,15 +279,15 @@ def test_runtime_preserves_fractional_frame_count_and_skips_missing_face(tmp_pat
     runtime.frame_memory_mb = .5  # Force several blocks even for tiny synthetic media.
     runtime.timesteps, runtime.fp = torch.tensor([0]), None
     runtime.no_face = (0., 0., 0., 0.)
-    original_frames, visited_frames = {}, []
-    def landmarks(paths, shift):
-        assert len(paths) <= 3
-        frames = [cv2.imread(path) for path in paths]
-        for path, frame in zip(paths, frames):
-            original_frames.setdefault(int(Path(path).stem), frame.tobytes())
-        return [detected_box] * len(paths), frames
+    visited_frames = []
+    from lipsync_service.media_stream import raw_frames
+    source_frames = list(raw_frames(video, 160, 120, Fraction(30000, 1001), 0, 30))
+    def landmarks(frames, shift):
+        assert len(frames) <= 3
+        return [detected_box] * len(frames), frames
     runtime.get_landmarks = landmarks
-    runtime.vae = SimpleNamespace(get_latents_for_unet=lambda crop: torch.zeros(1, 8, 2, 2),
+    runtime.vae = SimpleNamespace(preprocess_img=lambda crop, half_mask: torch.zeros(1, 3, 256, 256),
+                                  encode_latents=lambda batch: torch.zeros(len(batch), 4, 32, 32),
                                   decode_latents=lambda latent: np.zeros((len(latent), 256, 256, 3), dtype=np.uint8))
     batch_sizes = []
     def predict(latent, *args, **kw):
@@ -317,9 +317,8 @@ def test_runtime_preserves_fractional_frame_count_and_skips_missing_face(tmp_pat
     assert sum(batch_sizes) == expected_count and max(batch_sizes) <= 4
     assert audio_indices == list(range(expected_count))
     expected_indices = output_frame_indices(30, Fraction(30000, 1001), audio_seconds)
-    assert visited_frames == [original_frames[i] for i in expected_indices]
-    runtime.get_landmarks = lambda paths, shift: ([runtime.no_face] * len(paths),
-                                                 [cv2.imread(path) for path in paths])
+    assert visited_frames == [source_frames[i] for i in expected_indices]
+    runtime.get_landmarks = lambda frames, shift: ([runtime.no_face] * len(frames), frames)
     batch_sizes.clear()
     visited_frames.clear()
     passthrough = tmp_path / 'no-faces.mp4'

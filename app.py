@@ -49,6 +49,9 @@ def create_app(*, engine=None, storage=None, api_key=None, ttl=None, capacity=No
         precision = os.environ.get('LIPSYNC_FLOAT16', '1')
         if precision not in ('0', '1'):
             raise ValueError('LIPSYNC_FLOAT16 must be 0 or 1')
+        profile = os.environ.get('LIPSYNC_PROFILE', '1')
+        if profile not in ('0', '1'):
+            raise ValueError('LIPSYNC_PROFILE must be 0 or 1')
         configured_engine = MuseTalkEngine(
             model_dir=os.environ.get('LIPSYNC_MODEL_DIR', str(ROOT / 'models')),
             gpu=os.environ.get('LIPSYNC_GPU', '0'),
@@ -58,7 +61,9 @@ def create_app(*, engine=None, storage=None, api_key=None, ttl=None, capacity=No
             startup_timeout=positive_env('LIPSYNC_STARTUP_TIMEOUT', 600),
             idle_timeout=positive_env('LIPSYNC_IDLE_TIMEOUT', 600),
             media_idle_timeout=positive_env('LIPSYNC_MEDIA_IDLE_TIMEOUT', 120),
-            frame_memory_mb=positive_env('LIPSYNC_FRAME_MEMORY_MB', 256, int))
+            frame_memory_mb=positive_env('LIPSYNC_FRAME_MEMORY_MB', 256, int),
+            detect_max_side=int(os.environ.get('LIPSYNC_DETECT_MAX_SIDE', '1280')),
+            profile=profile == '1')
 
     @asynccontextmanager
     async def lifespan(app):

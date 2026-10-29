@@ -44,7 +44,8 @@ class MissingFaceTests(unittest.TestCase):
                     runtime = MuseTalkRuntime.__new__(MuseTalkRuntime)
                     runtime.no_face = (0., 0., 0., 0.)
                     runtime.batch_size, runtime.dtype, runtime.timesteps, runtime.fp = 2, None, None, None
-                    runtime.torch = SimpleNamespace(inference_mode=nullcontext, cat=lambda values: Batch(values))
+                    runtime.torch = SimpleNamespace(inference_mode=nullcontext, cat=lambda values, dim=0:
+                        Batch(item for value in values for item in value) if dim == 0 else Batch(zip(*values)))
                     used_audio = []
 
                     class Features:
@@ -53,7 +54,8 @@ class MissingFaceTests(unittest.TestCase):
                             return indices
 
                     audio_features = SimpleNamespace(features=Mock(side_effect=lambda indices, fps: Features()[indices]))
-                    runtime.vae = SimpleNamespace(get_latents_for_unet=lambda crop: crop,
+                    runtime.vae = SimpleNamespace(preprocess_img=lambda crop, half_mask: [crop],
+                                                  encode_latents=lambda batch: batch,
                                                   decode_latents=lambda batch: [Frame() for _ in batch])
                     runtime.pe = lambda features: features
                     runtime.unet = SimpleNamespace(model=Mock(side_effect=lambda batch, *a, **kw: SimpleNamespace(sample=batch)))

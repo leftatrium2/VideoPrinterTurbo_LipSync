@@ -34,6 +34,15 @@ def _worker(connection, settings):
     with log_path.open('a', buffering=1) as log:
         os.dup2(log.fileno(), 1)
         os.dup2(log.fileno(), 2)
+        # Spawn does not reliably inherit the API process's logging setup.
+        # Bind to stderr (fd 2), which is redirected to each task's inference.log.
+        family_logger = logging.getLogger('lipsync_service')
+        previous_level, previous_propagate = family_logger.level, family_logger.propagate
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s'))
+        family_logger.addHandler(handler)
+        family_logger.setLevel(logging.INFO)
+        family_logger.propagate = False
         try:
             # On Windows the parent attaches a kill-on-close Job Object before
             # this gate opens, so model initialization cannot orphan children.
@@ -72,16 +81,25 @@ def _worker(connection, settings):
                 pass
         finally:
             connection.close()
+            family_logger.removeHandler(handler)
+            handler.close()
+            family_logger.setLevel(previous_level)
+            family_logger.propagate = previous_propagate
 
 
 class MuseTalkEngine:
     def __init__(self, *, model_dir=None, gpu='0', batch_size=1, use_float16=True,
                  timeout=0, startup_timeout=600, runtime_dir=None, worker_target=None, timeline='strict',
-                 idle_timeout=600, media_idle_timeout=120, frame_memory_mb=256):
+                 idle_timeout=600, media_idle_timeout=120, frame_memory_mb=256,
+                 detect_max_side=1280, profile=True):
         if batch_size < 1:
             raise ValueError('MuseTalk batch size must be positive')
         if timeline not in ('strict', 'audio'):
             raise ValueError('Timeline must be strict or audio')
+        if type(detect_max_side) is not int or detect_max_side < 0:
+            raise ValueError('Detection max side must be a nonnegative integer')
+        if type(profile) is not bool:
+            raise ValueError('Profile must be a boolean')
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError('Inference timeout must be finite and nonnegative')
         if any(not math.isfinite(value) or value <= 0 for value in
@@ -96,6 +114,7 @@ class MuseTalkEngine:
             'runtime': str(Path(runtime_dir or ROOT / '.runtime' / 'musetalk').resolve()),
             'gpu': str(gpu), 'batch_size': batch_size, 'float16': use_float16, 'timeline': timeline,
             'media_idle_timeout': media_idle_timeout, 'frame_memory_mb': frame_memory_mb,
+            'detect_max_side': detect_max_side, 'profile': profile,
         }
         self._target = worker_target or _worker
         self._process = self._connection = None

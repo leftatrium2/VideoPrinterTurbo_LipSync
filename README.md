@@ -94,7 +94,7 @@ Normal shutdown asks the idle model worker to exit and waits up to 10 seconds fo
 
 Videos must have a constant frame rate and detectable faces. Default strict tasks require aligned inputs within 150 ms and preserve frame count/order/rate. Explicit audio tasks render to the complete audio duration, repeating source frames forward/reverse or ending output earlier as needed. Both modes retain fractional FPS sampling, full decode, expected duration and uploaded-audio checks. The same loaded worker handles alternating modes. Visual lip-sync quality requires manual review.
 
-Inference preserves the input display resolution. Frames are decoded and detected in bounded blocks (1–32 frames, sized from a pixel memory budget), temporary PNGs are deleted after each block, and a single encoder writes the output continuously. Forward blocks reuse the decoder; reverse cycles seek by block. Missing-face frames pass through unchanged. Output uses H.264 CRF 18; resolution preservation is not lossless encoding, and the existing BGR24 pipeline does not preserve HDR/high bit depth.
+Inference preserves the input display resolution. Frames are decoded and detected in bounded blocks (1–32 frames, sized from a pixel memory budget), full-resolution arrays pass directly through memory without temporary PNGs, and a single encoder writes the output continuously. Forward blocks reuse the decoder; reverse cycles seek by block. Missing-face frames pass through unchanged. Output uses H.264 CRF 18; resolution preservation is not lossless encoding, and the existing BGR24 pipeline does not preserve HDR/high bit depth.
 
 Whisper features keep the original 30-second boundaries, cache at most two segments on CPU, and transfer only the current inference batch to GPU. Global audio indices never restart at video block boundaries. Disk usage includes the input, output and temporary 16 kHz mono float32 PCM (about 220 MiB/hour). The frame budget is not a hard RSS cap: model/decoder/encoder/single-frame workspaces are additional. Frame-cache memory no longer grows with clip duration.
 
@@ -115,6 +115,8 @@ Timestamp validation streams frame records with an inactivity deadline instead o
 | `LIPSYNC_IDLE_TIMEOUT` | `600` | Worker inactivity deadline, reporting the last stage |
 | `LIPSYNC_MEDIA_IDLE_TIMEOUT` | `120` | Media output/frame I/O/finalization inactivity deadline |
 | `LIPSYNC_FRAME_MEMORY_MB` | `256` | Pixel memory budget in MiB, reserving three pixel buffers per frame |
+| `LIPSYNC_DETECT_MAX_SIDE` | `1280` | Detection/pose proxy max side; 0 uses full size. Coordinates map back to the original image, and proxy misses retry full-size detection |
+| `LIPSYNC_PROFILE` | `1` | Stage wall times and processing FPS; GPU stages synchronize for attribution. 0 disables profiling and its synchronization overhead |
 | `LIPSYNC_API_KEY` | empty | Bearer key for all `/v1` routes |
 | `LIPSYNC_STORAGE` | project/storage | Launcher temporary storage root |
 | `LIPSYNC_TTL` | `86400` | Idle lifetime of unsubmitted/finished sessions, seconds |
@@ -219,3 +221,24 @@ python -m pipeline.lip_sync.check_remote \
 ```
 
 Use the actual LAN IP. Credentials are read from LIPSYNC_API_KEY; the generated `.remote-verification.json` contains no key and records mode, job ID, elapsed time, durations and SHA-256. Use aligned inputs for strict acceptance and play the output to inspect lip quality.
+
+
+## Performance diagnostics
+
+The production frame path uses in-memory arrays instead of PNG encoding/writing/reading.
+Detection and pose estimation default to a 1280-pixel proxy, with independent X/Y
+coordinate mapping to the full-resolution crop/composite. Proxy misses retry the
+original frame; set `LIPSYNC_DETECT_MAX_SIDE=0` for full-size detection. Proxy detection
+can change boxes, so inspect small-face/occlusion cases. Output resolution is unchanged.
+No frame tracking, detection skipping or cached masks are used. VAE masking,
+normalization, sampling and channel order follow upstream, but masked/reference
+encoding uses two batched forwards rather than two forwards per frame. Batch size
+now affects VAE as well as UNet VRAM usage; start with 2 and measure.
+
+`MuseTalk timing:` lines appear in the task's `inference.log` about every 30 seconds
+and at completion, with cumulative stage seconds, GPU allocated memory and
+`processing_fps`. Processing FPS excludes upload, model readiness and timestamp
+preflight, but includes audio preparation and encoder backpressure. Encoder thread
+work may overlap other stages; write time is not total encoder CPU time. Use
+`LIPSYNC_PROFILE=0` after diagnosis to remove timing/synchronization overhead.
+No CUDA FPS or speedup is claimed without measurement on the deployment server.

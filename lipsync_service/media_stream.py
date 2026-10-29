@@ -244,8 +244,7 @@ class VideoFrames:
             self.stream.close()
             self.stream = None
 
-    def block(self, indices, directory):
-        import cv2
+    def read_block(self, indices):
         import numpy as np
         first = min(indices)
         reverse = len(indices) > 1 and indices[0] > indices[-1]
@@ -253,16 +252,16 @@ class VideoFrames:
             self.close()
             count = len(indices) if reverse else self.source_count - first
             self.stream = raw_frames(self.video, self.width, self.height, self.fps, first, count, **self.options)
+        frames = {}
         for index in range(first, first + len(indices)):
             try:
                 data = next(self.stream)
             except StopIteration:
                 raise ValueError(f'Decoded video frame count mismatch at source frame {index}') from None
             frame = np.frombuffer(data, dtype=np.uint8).reshape(self.height, self.width, 3)
-            if not cv2.imwrite(str(directory / f'{index:08d}.png'), frame):
-                raise InferenceError(f'Could not store decoded source frame {index}')
+            frames[index] = frame
         self.next_index = first + len(indices)
         if reverse:
             self.close()
             self.next_index = None
-        return [directory / f'{index:08d}.png' for index in indices]
+        return [frames[index] for index in indices]

@@ -102,7 +102,7 @@ bash start.sh
 
 输入视频须为恒定帧率、有可检测人脸的视频。HTTP 提交任务可选择 `timeline`：默认 `strict` 要求共享起点、时长差不超过 150ms，保持原帧数、顺序和帧率；显式 `audio` 按完整音频长度生成画面，允许正放/倒放循环或提前结束输出。两种模式均保留小数帧率采样、完整解码、预期时长和上传音轨校验；变帧率会失败；未检测到人脸的帧保留原始画面并跳过口型推理，口型效果仍需人工检查。同一常驻模型可以交替处理两种模式。
 
-推理保留输入显示分辨率，按 `LIPSYNC_FRAME_MEMORY_MB` 的像素预算分块处理（最多 32 帧，至少 1 帧），每块结束即删除临时图片；正向播放复用解码器，倒放循环按块寻帧。输出通过单个 FFmpeg 编码器持续写入，不保存整片生成图片。编码使用 H.264 CRF 18，保留分辨率不代表无损重编码；现有 BGR24 管线不保留 HDR/高位深。
+推理保留输入显示分辨率，按 `LIPSYNC_FRAME_MEMORY_MB` 的像素预算分块处理（最多 32 帧，至少 1 帧），帧以数组形式在内存传递，不创建临时 PNG 图片；正向播放复用解码器，倒放循环按块寻帧。输出通过单个 FFmpeg 编码器持续写入，不保存整片生成图片。编码使用 H.264 CRF 18，保留分辨率不代表无损重编码；现有 BGR24 管线不保留 HDR/高位深。
 
 音频按原有 30 秒分段提取 Whisper 特征，最多缓存两个分段到 CPU，仅当前推理批次进入 GPU；全局音频索引跨块保持连续。临时 PCM 为 16 kHz 单声道 float32（每小时约 220 MiB），磁盘仍需容纳上传文件、PCM 与输出。像素预算不是进程总内存上限：模型、解码器、编码器、单帧及工作缓冲另占内存；更高分辨率仍需更大的单帧资源，但帧缓存不再随视频时长增长。
 
@@ -123,6 +123,8 @@ bash start.sh
 | `LIPSYNC_IDLE_TIMEOUT` | `600` | worker 无进展超时，秒；报错包含最近处理阶段 |
 | `LIPSYNC_MEDIA_IDLE_TIMEOUT` | `120` | 媒体进程无输出/单帧读写/收尾等待超时，秒 |
 | `LIPSYNC_FRAME_MEMORY_MB` | `256` | 帧块像素预算 MiB；按分辨率自动计算块大小，并预留三倍像素空间 |
+| `LIPSYNC_DETECT_MAX_SIDE` | `1280` | 人脸检测与姿态估计的代理图最长边；0 使用原尺寸。原图及输出分辨率不变；代理图未检测到脸时自动重试原图 |
+| `LIPSYNC_PROFILE` | `1` | 记录分阶段累计耗时和处理 FPS；1 对 GPU 阶段同步计时，0 关闭计时及同步开销 |
 | `LIPSYNC_API_KEY` | 空 | `/v1` 接口 Bearer 密钥 |
 | `LIPSYNC_STORAGE` | 项目下 storage | 启动脚本的临时存储目录 |
 | `LIPSYNC_TTL` | `86400` | 未提交或已结束会话保留时长，秒 |
@@ -239,3 +241,29 @@ python -m pipeline.lip_sync.check_remote \
 ```
 
 服务地址使用实际局域网 IP。API 密钥通过 `LIPSYNC_API_KEY` 环境变量提供；工具输出不含密钥的 `.remote-verification.json`，记录任务 ID、模式、耗时、音视频时长和哈希。strict 验收使用已对齐素材，仍需播放输出检查口型与画面。
+
+
+## 性能诊断
+
+帧从 FFmpeg 解码后直接以原尺寸数组传入检测/裁图/合成，不经过 PNG 压缩或磁盘往返。
+检测默认使用最长边 1280 的代理图；检测框和关键点按实际宽高比例映射回原图，
+生成与合成使用原始分辨率的图像。代理检测不是原图检测的数值等价替换；极小人脸、
+遮挡等场景仍需检查效果，代理漏检会重试原图，也可设置 `LIPSYNC_DETECT_MAX_SIDE=0` 对照。
+不使用跨帧跳检、跟踪或掩码复用，未检测到脸仍保留原画面。
+
+VAE 保留上游遮罩、归一化、采样及通道排列，将每批的 masked/reference 分别批量编码，
+减少逐帧模型调用。增加 batch 会同时增加 VAE/UNet 显存占用，建议先使用 2，实测后再调整。
+
+每约 30 秒及任务结束时在任务 `inference.log` 中记录 `MuseTalk timing:`，包含
+`video_decode`、`face_detection`、`pose_estimation`、`audio_features`、`vae_encode`、
+`unet`、`vae_decode`、`blend`、`encoder_write` 累计秒数及 `processing_fps`。
+处理 FPS 排除了上传、模型就绪和整片时间戳校验；音频首次解码及后续编码等待仍计入处理耗时。
+各阶段耗时不是当前帧的耗时，编码线程内部工作与其他阶段可重叠，`encoder_write` 主要表示写入与背压等待。
+默认同步 GPU 计时使 GPU 阶段归属更清晰，但会有测量开销，定位后可用 `LIPSYNC_PROFILE=0` 关闭。
+
+```bash
+LIPSYNC_BATCH_SIZE=2 LIPSYNC_FRAME_MEMORY_MB=512 \
+LIPSYNC_DETECT_MAX_SIDE=1280 LIPSYNC_PROFILE=1 bash start.sh
+```
+
+这些修改旨在消除重复工作；没有目标 CUDA 服务器的实测结果时，不承诺具体 FPS 或加速倍数。

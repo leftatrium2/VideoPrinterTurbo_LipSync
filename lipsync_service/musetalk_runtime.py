@@ -19,36 +19,62 @@ from .engine import probe
 from .audio_stream import AudioFeatures
 from .media_stream import VideoFrames, frame_blocks, frame_count, lines, video_writer
 from .errors import InferenceError
+from .profiling import StageProfiler
 
 logger = logging.getLogger(__name__)
 
 
-def detect_landmarks(paths, preprocessing):
-    """Bounded adapter; upstream's summary divides by zero on all-no-face blocks."""
+def detect_landmarks(images, preprocessing, *, max_side=0, profiler=None):
+    """Detect on a proxy image; return full-resolution frames and coordinates.
+
+    A missed proxy detection is retried at full size so small faces are not
+    silently classified as absent solely because of downsampling.
+    """
     import cv2
     import numpy as np
+    profile = profiler or StageProfiler(enabled=False)
     coords, frames = [], []
-    for path in paths:
-        frame = cv2.imread(path)
+    for image in images:
+        frame = cv2.imread(str(image)) if isinstance(image, (str, Path)) else image
         if frame is None:
             raise ValueError('Could not read decoded video frame')
         frames.append(frame)
-        detected = preprocessing.fa.get_detections_for_batch(np.asarray([frame]))[0]
+        height, width = frame.shape[:2]
+        proxy = frame
+        if max_side and max(height, width) > max_side:
+            ratio = max_side / max(height, width)
+            proxy = cv2.resize(frame, (max(1, round(width * ratio)), max(1, round(height * ratio))),
+                               interpolation=cv2.INTER_AREA)
+        with profile.measure('face_detection', gpu=True):
+            detected = preprocessing.fa.get_detections_for_batch(np.asarray([proxy]))[0]
+            if detected is None and proxy is not frame:
+                proxy = frame
+                detected = preprocessing.fa.get_detections_for_batch(np.asarray([frame]))[0]
         if detected is None:
             coords.append(preprocessing.coord_placeholder)
             continue
-        results = preprocessing.merge_data_samples(preprocessing.inference_topdown(preprocessing.model, frame))
+        sx, sy = width / proxy.shape[1], height / proxy.shape[0]
+        fallback = tuple(float(value) * scale for value, scale in zip(detected, (sx, sy, sx, sy)))
+        with profile.measure('pose_estimation', gpu=True):
+            results = preprocessing.merge_data_samples(preprocessing.inference_topdown(preprocessing.model, proxy))
         points = results.pred_instances.keypoints
         if not len(points):
-            coords.append(detected)
+            coords.append(fallback)
             continue
-        face = points[0][23:91].astype(np.int32)
+        face = (points[0][23:91] * np.asarray([sx, sy])).astype(np.int32)
         middle = face[29][1]
         box = (np.min(face[:, 0]), int(max(0, 2 * middle - np.max(face[:, 1]))),
                np.max(face[:, 0]), np.max(face[:, 1]))
         x1, y1, x2, y2 = box
-        coords.append(detected if y2 <= y1 or x2 <= x1 or x1 < 0 else box)
+        coords.append(fallback if y2 <= y1 or x2 <= x1 or x1 < 0 else box)
     return coords, frames
+
+
+def batched_vae_latents(vae, crops, torch):
+    """Keep upstream masking/normalization/sampling while batching VAE forwards."""
+    masked = torch.cat([vae.preprocess_img(crop, half_mask=True) for crop in crops])
+    reference = torch.cat([vae.preprocess_img(crop, half_mask=False) for crop in crops])
+    return torch.cat([vae.encode_latents(masked), vae.encode_latents(reference)], dim=1)
 
 
 def normalize_face_box(box, width, height, frame_index):
@@ -227,6 +253,9 @@ class MuseTalkRuntime:
         self.timeline = settings['timeline']
         self.frame_memory_mb = settings.get('frame_memory_mb', 256)
         self.media_idle_timeout = settings.get('media_idle_timeout', 120)
+        self.detect_max_side = settings.get('detect_max_side', 1280)
+        self.profile_enabled = settings.get('profile', True)
+        self.profiler = None
         self.vae, self.unet, self.pe = load_all_model(
             unet_model_path=str(models / 'musetalkV15' / 'unet.pth'),
             unet_config=str(models / 'musetalkV15' / 'musetalk.json'),
@@ -241,48 +270,56 @@ class MuseTalkRuntime:
         self.fp = FaceParsing(left_cheek_width=90, right_cheek_width=90)
         self.get_image = get_image
         from musetalk.utils import preprocessing
-        self.get_landmarks = lambda paths, shift: detect_landmarks(paths, preprocessing)
+        self.get_landmarks = lambda frames, shift: detect_landmarks(
+            frames, preprocessing, max_side=self.detect_max_side, profiler=self.profiler)
         self.no_face = coord_placeholder
         self.timesteps = torch.tensor([0], device=self.device)
 
-    def _process_block(self, paths, source_indices, output_start, rate, audio_features, write, report):
+    def _process_block(self, images, source_indices, output_start, rate, audio_features, write, report, profiler=None):
         import cv2
         import numpy as np
         torch = self.torch
-        coords, frames = self.get_landmarks(list(map(str, paths)), 0)
-        if len(coords) != len(paths) or len(frames) != len(paths):
+        profile = profiler or StageProfiler(enabled=False)
+        coords, frames = self.get_landmarks(images, 0)
+        if len(coords) != len(images) or len(frames) != len(images):
             raise ValueError('Face preprocessing frame count mismatch')
         boxes = []
         for box, frame, source_index in zip(coords, frames, source_indices):
             boxes.append(None if tuple(box) == self.no_face else
                          normalize_face_box(box, frame.shape[1], frame.shape[0], source_index))
         report(f'Face detection finished at output frame {output_start}')
-        for start in range(0, len(paths), self.batch_size):
-            end = min(start + self.batch_size, len(paths))
+        for start in range(0, len(images), self.batch_size):
+            end = min(start + self.batch_size, len(images))
             active = [i for i in range(start, end) if boxes[i] is not None]
             combined = list(frames[start:end])
             if active:
-                chunks = audio_features.features([output_start + i for i in active], rate)
-                latents = []
-                for index in active:
-                    x1, y1, x2, y2 = boxes[index]
-                    crop = cv2.resize(frames[index][y1:y2, x1:x2], (256, 256),
-                                      interpolation=cv2.INTER_LANCZOS4)
-                    latents.append(self.vae.get_latents_for_unet(crop))
-                prediction = self.unet.model(
-                    torch.cat(latents).to(dtype=self.dtype), self.timesteps,
-                    encoder_hidden_states=self.pe(chunks)).sample
-                reconstructed = self.vae.decode_latents(prediction)
+                with profile.measure('audio_features', gpu=True):
+                    chunks = audio_features.features([output_start + i for i in active], rate)
+                with profile.measure('vae_encode', gpu=True):
+                    crops = []
+                    for index in active:
+                        x1, y1, x2, y2 = boxes[index]
+                        crops.append(cv2.resize(frames[index][y1:y2, x1:x2], (256, 256),
+                                                interpolation=cv2.INTER_LANCZOS4))
+                    latents = batched_vae_latents(self.vae, crops, torch)
+                with profile.measure('unet', gpu=True):
+                    prediction = self.unet.model(latents.to(dtype=self.dtype), self.timesteps,
+                                                 encoder_hidden_states=self.pe(chunks)).sample
+                with profile.measure('vae_decode', gpu=True):
+                    reconstructed = self.vae.decode_latents(prediction)
                 if len(reconstructed) != len(active):
                     raise ValueError('Model output frame count mismatch')
-                for index, face in zip(active, reconstructed):
-                    x1, y1, x2, y2 = boxes[index]
-                    face = cv2.resize(face.astype(np.uint8), (x2 - x1, y2 - y1))
-                    combined[index - start] = self.get_image(frames[index].copy(), face, boxes[index],
-                                                            mode='jaw', fp=self.fp)
-            for frame in combined:
-                write(frame)
+                with profile.measure('blend', gpu=True):
+                    for index, face in zip(active, reconstructed):
+                        x1, y1, x2, y2 = boxes[index]
+                        face = cv2.resize(face.astype(np.uint8), (x2 - x1, y2 - y1))
+                        combined[index - start] = self.get_image(frames[index].copy(), face, boxes[index],
+                                                                mode='jaw', fp=self.fp)
+            with profile.measure('encoder_write'):
+                for frame in combined:
+                    write(frame)
             report({'stage': 'inference', 'completed': output_start + end, 'unit': 'frames'})
+
 
     def run(self, video, audio, output, *, timeline=None):
         torch = self.torch
@@ -309,8 +346,10 @@ class MuseTalkRuntime:
                     logger.info('MuseTalk progress: %s', update)
                 last_report = now
 
+        profile = self.profiler = StageProfiler(torch, enabled=getattr(self, 'profile_enabled', True))
         idle = getattr(self, 'media_idle_timeout', 120)
-        metadata = video_metadata(video, idle_timeout=idle)
+        with profile.measure('metadata'):
+            metadata = video_metadata(video, idle_timeout=idle)
         width, height = int(metadata['width']), int(metadata['height'])
         rotation = next((float(item['rotation']) for item in metadata.get('side_data_list', [])
                          if 'rotation' in item), 0)
@@ -320,7 +359,8 @@ class MuseTalkRuntime:
             width, height = height, width
         if min(width, height) < 1:
             raise ValueError('Video has invalid dimensions')
-        rate, source_count = video_timing(video, idle_timeout=idle, progress=report, metadata=metadata)
+        with profile.measure('timestamp_validation'):
+            rate, source_count = video_timing(video, idle_timeout=idle, progress=report, metadata=metadata)
         audio_duration = probe(audio, 'audio') if selected == 'audio' else None
         output_count = frame_count(source_count, rate, audio_duration)
         report({'stage': 'inference', 'completed': 0, 'total': output_count, 'unit': 'frames'})
@@ -328,8 +368,10 @@ class MuseTalkRuntime:
         # encoder and model workspaces are additional, resolution-dependent costs.
         budget = getattr(self, 'frame_memory_mb', 256) * 1024**2
         limit = max(1, min(32, int(budget // (width * height * 3 * 3))))
-        logger.info('Streaming %sx%s at %s FPS: %s output frames, block size %s',
-                    width, height, rate, output_count, limit)
+        logger.info('Streaming %sx%s at %s FPS: %s output frames, block size %s, detection max side %s',
+                    width, height, rate, output_count, limit, getattr(self, 'detect_max_side', 1280))
+        profile.start_frames()
+        completed = 0
         with tempfile.TemporaryDirectory(prefix='musetalk-', dir=output.parent) as directory:
             directory = Path(directory)
             audio_features = AudioFeatures(self, audio, directory, idle_timeout=idle, progress=report)
@@ -340,11 +382,16 @@ class MuseTalkRuntime:
                                                           idle_timeout=idle, progress=report) as write:
                     for output_start, source_indices in frame_blocks(source_count, output_count, limit):
                         report(f'Video block starting at output frame {output_start}/{output_count}')
-                        with tempfile.TemporaryDirectory(prefix='frames-', dir=directory) as block:
-                            paths = decoder.block(source_indices, Path(block))
-                            self._process_block(paths, source_indices, output_start, rate,
-                                                audio_features, write, report)
+                        with profile.measure('video_decode'):
+                            images = decoder.read_block(source_indices)
+                        self._process_block(images, source_indices, output_start, rate,
+                                            audio_features, write, report, profiler=profile)
+                        completed = output_start + len(images)
+                        del images
+                        profile.report(completed, output_count)
                     report({'stage': 'encoding_finalize'})
             finally:
                 decoder.close()
                 audio_features.close()
+                profile.report(completed, output_count, force=True)
+                self.profiler = None

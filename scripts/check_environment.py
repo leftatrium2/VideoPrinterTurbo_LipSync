@@ -61,6 +61,8 @@ def main():
                                 idle_timeout=float(os.environ.get('LIPSYNC_IDLE_TIMEOUT', '600')),
                                 media_idle_timeout=float(os.environ.get('LIPSYNC_MEDIA_IDLE_TIMEOUT', '120')),
                                 frame_memory_mb=int(os.environ.get('LIPSYNC_FRAME_MEMORY_MB', '256')),
+                                detect_max_side=int(os.environ.get('LIPSYNC_DETECT_MAX_SIDE', '1280')),
+                                profile=os.environ.get('LIPSYNC_PROFILE', '1') == '1',
                                 use_float16=os.environ.get('LIPSYNC_FLOAT16', '1') == '1')
         try:
             try:

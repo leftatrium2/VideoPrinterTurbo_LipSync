@@ -61,3 +61,18 @@ class ConfigurationTests(unittest.TestCase):
                 with self.subTest(key=key, value=value), patch.dict(os.environ, {key: value}, clear=True):
                     with self.assertRaises(ValueError):
                         create_app()
+
+    def test_detection_proxy_and_profiling_configuration(self):
+        with patch.dict(os.environ, {}, clear=True):
+            settings = create_app().state.engine.settings
+            self.assertEqual(settings['detect_max_side'], 1280)
+            self.assertTrue(settings['profile'])
+        with patch.dict(os.environ, {'LIPSYNC_DETECT_MAX_SIDE': '0', 'LIPSYNC_PROFILE': '0'}, clear=True):
+            settings = create_app().state.engine.settings
+            self.assertEqual(settings['detect_max_side'], 0)
+            self.assertFalse(settings['profile'])
+        for settings in ({'LIPSYNC_DETECT_MAX_SIDE': '-1'}, {'LIPSYNC_DETECT_MAX_SIDE': 'bad'},
+                         {'LIPSYNC_PROFILE': 'yes'}):
+            with self.subTest(settings=settings), patch.dict(os.environ, settings, clear=True):
+                with self.assertRaises(ValueError):
+                    create_app()
