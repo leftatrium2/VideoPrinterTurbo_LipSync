@@ -116,3 +116,36 @@ def test_mismatched_audio_job_metadata_is_rejected(metadata):
     client = remote.RemoteLipSync('http://unit.test', timeline='audio')
     with pytest.raises(RuntimeError):
         client._validate_job({'status': 'succeeded', **metadata}, 1)
+
+
+def test_unlimited_client_can_poll_after_two_hours_with_bounded_requests(monkeypatch):
+    client, clock = setup_client(monkeypatch, lambda *a, **kw: reply(200, {}))
+    assert client.job_timeout == 0
+    client._deadline = float('inf')
+    clock.now = 24 * 3600
+    timeouts = []
+    client._session.request = lambda *a, **kw: (timeouts.append(kw['timeout']) or reply(200, {}))
+    client._pause(2)
+    with client._request('GET', 'jobs/existing'):
+        pass
+    assert timeouts == [client.request_timeout]
+    assert clock.now == 24 * 3600 + 2
+    client._session.request = lambda *a, **kw: reply(503, {'detail': 'not ready'})
+    with pytest.raises(TimeoutError, match='readiness'):
+        client._wait_ready()
+    assert clock.now == 24 * 3600 + 2 + client.readiness_timeout
+
+
+def test_explicit_deadline_reports_job_and_recovery_instructions(monkeypatch):
+    client, clock = setup_client(monkeypatch, lambda *a, **kw: reply(200, {}), budget=10)
+    client.job_timeout = 10
+    client.last_job_id = 'existing-job'
+    with pytest.raises(TimeoutError, match='job_id=existing-job.*checkpoint retained.*job_timeout=0'):
+        client._pause(11)
+    assert clock.now == 10
+
+
+@pytest.mark.parametrize('budget', [-1, float('inf'), float('nan'), True])
+def test_invalid_total_deadline_rejected(budget):
+    with pytest.raises(ValueError, match='job_timeout'):
+        remote.RemoteLipSync('http://unit.test', job_timeout=budget)
