@@ -14,6 +14,19 @@ try {
         $Python = Join-Path $Prefix 'python.exe'
         if (-not (Test-Path -LiteralPath $Python)) { throw 'Run install.bat first.' }
         Set-ProjectEnvironment -Root $PSScriptRoot -Prefix $Prefix
+        # Performance defaults; explicit environment settings take precedence.
+        $PerformanceDefaults = @{
+            LIPSYNC_BATCH_SIZE = '2'
+            LIPSYNC_FRAME_MEMORY_MB = '512'
+            LIPSYNC_FLOAT16 = '1'
+            LIPSYNC_DETECT_MAX_SIDE = '1280'
+            LIPSYNC_PROFILE = '1'
+        }
+        foreach ($Name in $PerformanceDefaults.Keys) {
+            if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($Name, 'Process'))) {
+                [Environment]::SetEnvironmentVariable($Name, $PerformanceDefaults[$Name], 'Process')
+            }
+        }
         $env:LIPSYNC_ENGINE = 'musetalk'
         Remove-Item Env:LIPSYNC_COMMAND -ErrorAction SilentlyContinue
         if (-not $env:LIPSYNC_STORAGE) { $env:LIPSYNC_STORAGE = Join-Path $PSScriptRoot 'storage' }

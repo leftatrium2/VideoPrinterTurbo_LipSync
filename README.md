@@ -102,6 +102,8 @@ Timestamp validation streams frame records with an inactivity deadline instead o
 
 ## Configuration
 
+`start.sh`, `start.bat` and `start.ps1` use these performance defaults: `LIPSYNC_BATCH_SIZE=2`, `LIPSYNC_FRAME_MEMORY_MB=512`, `LIPSYNC_FLOAT16=1`, `LIPSYNC_DETECT_MAX_SIDE=1280`, `LIPSYNC_PROFILE=1`. Simply run the startup script; nonempty environment variables override these defaults (including `0`). The configuration table below describes the Python application defaults when launched directly.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `LIPSYNC_HOST` | `0.0.0.0` | Linux/Windows launcher bind address; overridable with the environment variable |

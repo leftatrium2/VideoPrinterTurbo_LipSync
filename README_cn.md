@@ -110,6 +110,8 @@ bash start.sh
 
 ## 配置
 
+`start.sh`、`start.bat` 和 `start.ps1` 默认使用以下性能参数：`LIPSYNC_BATCH_SIZE=2`、`LIPSYNC_FRAME_MEMORY_MB=512`、`LIPSYNC_FLOAT16=1`、`LIPSYNC_DETECT_MAX_SIDE=1280`、`LIPSYNC_PROFILE=1`。直接运行启动脚本即可，无需额外输入参数；已设置的非空环境变量优先（包括 `0`）。下方配置表列出直接启动 Python 服务时的应用默认值。
+
 | 环境变量 | 默认值 | 含义 |
 | --- | --- | --- |
 | `LIPSYNC_HOST` | `0.0.0.0` | Linux/Windows 启动脚本监听地址，可通过环境变量覆盖 |
@@ -262,8 +264,7 @@ VAE 保留上游遮罩、归一化、采样及通道排列，将每批的 masked
 默认同步 GPU 计时使 GPU 阶段归属更清晰，但会有测量开销，定位后可用 `LIPSYNC_PROFILE=0` 关闭。
 
 ```bash
-LIPSYNC_BATCH_SIZE=2 LIPSYNC_FRAME_MEMORY_MB=512 \
-LIPSYNC_DETECT_MAX_SIDE=1280 LIPSYNC_PROFILE=1 bash start.sh
+bash start.sh
 ```
 
 这些修改旨在消除重复工作；没有目标 CUDA 服务器的实测结果时，不承诺具体 FPS 或加速倍数。
